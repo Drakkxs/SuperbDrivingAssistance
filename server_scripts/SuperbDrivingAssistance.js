@@ -6,7 +6,13 @@
     // kubejs/server_scripts/SuperbDrivingAssistance.js
     const DEBUG_DRIVING = true;
     const DEBUG_EVERY_TICKS = 5;
-    
+
+    const REVERSE_ALIGN_MAX_TICKS = 64;
+    const REVERSE_ALIGN_COOLDOWN_TICKS = 18;
+
+    const CREEP_FORWARD_TICKS = 3;
+    const CREEP_FORWARD_COOLDOWN_TICKS = 8;
+
     const { $ClipContext$Block, $ClipContext$Fluid, $ClipContext } = require("@package/net/minecraft/world/level");
     const { $OBB } = require("@package/com/atsuishio/superbwarfare/tools");
     const { $BlockPos } = require("@package/net/minecraft/core");
@@ -209,9 +215,14 @@
     function startReverseAlign(vehicle) {
         const data = vehicle.getPersistentData();
 
-        // Deliberate reverse-align duration.
-        // 20 ticks = about 1 second.
-        data.putInt("sbw_ai_reverse_align_ticks", 20);
+        data.putInt("sbw_ai_reverse_align_ticks", REVERSE_ALIGN_MAX_TICKS);
+
+        // This prevents REVERSE_ALIGN from immediately restarting forever.
+        // We include the active time + extra cooldown.
+        data.putInt(
+            "sbw_ai_reverse_align_cooldown",
+            REVERSE_ALIGN_MAX_TICKS + REVERSE_ALIGN_COOLDOWN_TICKS
+        );
     }
 
     function applyReverseAlign(vehicle, diff) {
@@ -233,17 +244,10 @@
     function assistedDrive(vehicle, distance, followRange, diff, absDiff) {
         const data = vehicle.getPersistentData();
 
+        updateDrivingTimers(vehicle);
+
         let reverseTicks = data.getInt("sbw_ai_reverse_ticks");
         let reverseAlignTicks = data.getInt("sbw_ai_reverse_align_ticks");
-
-        if (reverseAlignTicks > 0) {
-            data.putInt("sbw_ai_reverse_align_ticks", reverseAlignTicks - 1);
-
-            applyReverseAlign(vehicle, diff);
-
-            updateStuckTicks(vehicle, true);
-            return true;
-        }
 
         const frontBlocked = isFrontRayBlocked(vehicle);
         const collision = isVehicleCollidingThisTick(vehicle);
@@ -253,15 +257,44 @@
 
         debugDriving(
             vehicle,
-            `state=${driveState} diff=${diff.toFixed(1)} front=${frontBlocked} speed=${speed.toFixed(2)} reverse=${reverseTicks} align=${reverseAlignTicks} stuck=${data.getInt("sbw_ai_stuck_ticks")}`
+            `state=${driveState} diff=${diff.toFixed(1)} front=${frontBlocked} speed=${speed.toFixed(2)} reverse=${reverseTicks} align=${reverseAlignTicks} alignCd=${data.getInt("sbw_ai_reverse_align_cooldown")} creep=${data.getInt("sbw_ai_creep_forward_ticks")} stuck=${data.getInt("sbw_ai_stuck_ticks")}`
         );
 
+        // Active reverse-align maneuver.
+        // This is now limited. It cannot run forever.
+        if (reverseAlignTicks > 0) {
+            data.putInt("sbw_ai_reverse_align_ticks", reverseAlignTicks - 1);
+
+            // If we have swung around enough, stop reversing early.
+            if (absDiff < 45) {
+                stopReverseAlign(vehicle);
+                holdVehicle(vehicle);
+                updateStuckTicks(vehicle, false);
+                return false;
+            }
+
+            // If we reversed too far away, stop reversing early.
+            if (distance > followRange * 0.6) {
+                stopReverseAlign(vehicle);
+                holdVehicle(vehicle);
+                updateStuckTicks(vehicle, false);
+                return false;
+            }
+
+            applyReverseAlign(vehicle, diff);
+
+            updateStuckTicks(vehicle, true);
+            return true;
+        }
+
+        // If target is getting too far away, cancel obstacle recovery reverse.
         if (distance > followRange * 0.6) {
             reverseTicks = 0;
             data.putInt("sbw_ai_reverse_ticks", 0);
             data.putInt("sbw_ai_stuck_ticks", 0);
         }
 
+        // Obstacle recovery reverse.
         if (reverseTicks > 0) {
             data.putInt("sbw_ai_reverse_ticks", reverseTicks - 1);
 
@@ -274,8 +307,8 @@
             return true;
         }
 
-
         const frontBlockedTicks = updateFrontBlockedTicks(vehicle, frontBlocked);
+
         if (frontBlocked) {
             const leftBlocked = isFrontLeftRayBlocked(vehicle);
             const rightBlocked = isFrontRightRayBlocked(vehicle);
@@ -291,8 +324,6 @@
                 assistedLeft(vehicle);
             }
 
-            // If we have been blocked in front for a bit,
-            // back up while turning toward the chosen open side.
             if (frontBlockedTicks >= 10) {
                 data.putInt("sbw_ai_front_blocked_ticks", 0);
 
@@ -310,17 +341,26 @@
         }
 
         if (driveState == "REVERSE_ALIGN") {
-            startReverseAlign(vehicle);
-            applyReverseAlign(vehicle, diff);
+            if (canStartReverseAlign(vehicle)) {
+                startReverseAlign(vehicle);
+                applyReverseAlign(vehicle, diff);
 
-            updateStuckTicks(vehicle, true);
-            return true;
+                updateStuckTicks(vehicle, true);
+                return true;
+            }
+
+            // Cooldown active.
+            // Do not restart reverse immediately.
+            holdVehicle(vehicle);
+            updateStuckTicks(vehicle, false);
+            return false;
         }
 
         if (driveState == "TURN_ONLY") {
-            // Small controlled movement so steering can actually affect the vehicle.
-            vehicle.setForwardInputDown(false);
-            vehicle.setBackInputDown(true);
+            // Instead of infinite reverse, use a tiny forward pulse.
+            // This gives wheeled vehicles some movement so steering can matter,
+            // without full-throttle circling forever.
+            assistedCreepForward(vehicle);
 
             updateStuckTicks(vehicle, true);
             return true;
@@ -331,7 +371,6 @@
         vehicle.setBackInputDown(false);
 
         const stuckTicks = updateStuckTicks(vehicle, true);
-
 
         if (stuckTicks >= 10) {
             data.putInt("sbw_ai_stuck_ticks", 0);
@@ -609,6 +648,64 @@
             rayY,
             center.z() + forward.z() * frontOffset
         );
+    }
+
+    function updateDrivingTimers(vehicle) {
+        const data = vehicle.getPersistentData();
+
+        decrementTimer(data, "sbw_ai_reverse_align_cooldown");
+        decrementTimer(data, "sbw_ai_creep_forward_cooldown");
+    }
+
+    function decrementTimer(data, key) {
+        const value = data.getInt(key);
+
+        if (value > 0) {
+            data.putInt(key, value - 1);
+        }
+    }
+
+    function canStartReverseAlign(vehicle) {
+        const data = vehicle.getPersistentData();
+
+        return data.getInt("sbw_ai_reverse_align_ticks") <= 0
+            && data.getInt("sbw_ai_reverse_align_cooldown") <= 0;
+    }
+
+    function stopReverseAlign(vehicle) {
+        const data = vehicle.getPersistentData();
+
+        data.putInt("sbw_ai_reverse_align_ticks", 0);
+    }
+
+    function assistedCreepForward(vehicle) {
+        const data = vehicle.getPersistentData();
+
+        let creepTicks = data.getInt("sbw_ai_creep_forward_ticks");
+
+        if (creepTicks > 0) {
+            data.putInt("sbw_ai_creep_forward_ticks", creepTicks - 1);
+
+            vehicle.setForwardInputDown(true);
+            vehicle.setBackInputDown(false);
+
+            return true;
+        }
+
+        const cooldown = data.getInt("sbw_ai_creep_forward_cooldown");
+
+        if (cooldown > 0) {
+            holdVehicle(vehicle);
+            return false;
+        }
+
+        data.putInt("sbw_ai_creep_forward_ticks", CREEP_FORWARD_TICKS);
+        data.putInt("sbw_ai_creep_forward_cooldown", CREEP_FORWARD_COOLDOWN_TICKS);
+
+        vehicle.setForwardInputDown(true);
+        vehicle.setBackInputDown(false);
+
+        return true;
     }
 
     function drawCustomRayLine(vehicle, from, to, hit) {

@@ -1,0 +1,12 @@
+{
+    "probejs.modHash": 2902797938038468393,
+    "probejs.generateBeans": false,
+    "probejs.enabled": false,
+    "probejs.newGame": false,
+    "probejs.fullScanMods": [
+        "minecraft",
+        "kubejs",
+        "neoforge",
+        "superbwarfare"
+    ]
+}

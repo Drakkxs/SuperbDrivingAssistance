@@ -13,6 +13,16 @@
     const CREEP_FORWARD_TICKS = 3;
     const CREEP_FORWARD_COOLDOWN_TICKS = 8;
 
+    // Matches VehicleEffectUtils.lowHealthWarning:
+    // smoke starts at vehicle.health <= 0.4 * vehicle.getMaxHealth()
+    // only when vehicle.data().compute().hasLowHealthWarning is true.
+    const SMOKE_HEALTH_RATIO = 0.40;
+
+    // If attacker is in front-ish, reverse away.
+    // If attacker is behind-ish, drive forward away.
+    const PANIC_FORWARD_ANGLE = 70;
+
+    const { $UUID } = require("@package/java/util");
     const { $ClipContext$Block, $ClipContext$Fluid, $ClipContext } = require("@package/net/minecraft/world/level");
     const { $OBB } = require("@package/com/atsuishio/superbwarfare/tools");
     const { $BlockPos } = require("@package/net/minecraft/core");
@@ -130,13 +140,16 @@
     }
 
     function moveVehicle(vehicle, driver) {
+        const followRange = driver.getAttributeValue("minecraft:generic.follow_range");
+
+        // Safety system runs first.
+        // This does not care whether the mob driver has a normal target.
+        if (tryPanicEscape(vehicle, driver, followRange)) {
+            return;
+        }
+
+        // Normal combat driving starts only after panic says "not my problem."
         const target = driver.getTarget ? driver.getTarget() : null;
-
-        const vbox = getVehicleAABB(vehicle);
-        const direction = vehicle.getForwardDirection();
-        const forward = vbox.move(direction.x(), direction.y(), direction.z());
-
-        drawBox(vehicle, vbox);
         if (!(target instanceof $LivingEntity)) return;
 
         updateRecoveryCooldown(vehicle);
@@ -144,14 +157,257 @@
         const diff = getDiffToPosition(vehicle, target.position());
         const absDiff = Math.abs(diff);
 
-        // Always turn toward target.
         steerTowardDiff(vehicle, diff, absDiff);
 
-        const followRange = driver.getAttributeValue("minecraft:generic.follow_range");
         const distance = vehicle.distanceToEntity(target);
 
         assistedDrive(vehicle, distance, followRange, diff, absDiff);
     }
+
+    function tryPanicEscape(vehicle, driver, followRange) {
+        const healthRatio = getVehicleHealthRatio(vehicle);
+        const warning = vehicleHasLowHealthWarning(vehicle);
+        const attackerUuid = getVehicleLastAttackerUuid(vehicle);
+
+        // Debug this even when panic fails, because this is how we find the broken link.
+        debugDriving(
+            vehicle,
+            `panicCheck hp=${healthRatio.toFixed(2)} smoke=${SMOKE_HEALTH_RATIO.toFixed(2)} warning=${warning} uuid=${attackerUuid}`
+        );
+
+        if (!warning) return false;
+        if (healthRatio > SMOKE_HEALTH_RATIO) return false;
+        if (attackerUuid == "") return false;
+
+        const attacker = getLastAttackerEntity(vehicle);
+
+        if (!(attacker instanceof $LivingEntity)) {
+            debugDriving(
+                vehicle,
+                `panicFail uuidFoundButEntityMissing uuid=${attackerUuid}`
+            );
+
+            return false;
+        }
+
+        const panicDistance = vehicle.distanceToEntity(attacker);
+
+        // If we escaped the attacker's relevant range, stop the vehicle.
+        // Do not instantly return to normal chase while smoking.
+        if (panicDistance > followRange) {
+            debugDriving(
+                vehicle,
+                `PANIC escaped dist=${panicDistance.toFixed(1)}/${followRange.toFixed(1)}`
+            );
+
+            holdVehicle(vehicle);
+            return true;
+        }
+
+        assistedPanicDrive(vehicle, attacker, panicDistance, followRange);
+        return true;
+    }
+
+
+    function shouldPanic(vehicle) {
+        const healthRatio = getVehicleHealthRatio(vehicle);
+        const lastAttackerUuid = getVehicleLastAttackerUuid(vehicle);
+
+        return vehicleHasLowHealthWarning(vehicle)
+            && healthRatio <= SMOKE_HEALTH_RATIO
+            && lastAttackerUuid != "";
+    }
+
+    function vehicleHasLowHealthWarning(vehicle) {
+        try {
+            return vehicle.data().compute().getHasLowHealthWarning();
+        } catch (error) {
+        }
+
+        return true;
+    }
+
+    function applyReverseAwayFromTarget(vehicle, diff) {
+        vehicle.setForwardInputDown(false);
+        vehicle.setBackInputDown(true);
+
+        // This is escape steering, not chase steering.
+        // If the vehicle turns the wrong way in-game, swap assistedLeft/assistedRight here.
+        if (diff < -12) {
+            assistedLeft(vehicle);
+        } else if (diff > 12) {
+            assistedRight(vehicle);
+        } else {
+            vehicle.setLeftInputDown(false);
+            vehicle.setRightInputDown(false);
+        }
+    }
+
+    function assistedPanicDrive(vehicle, attacker, distance, followRange) {
+        const data = vehicle.getPersistentData();
+
+        updateDrivingTimers(vehicle);
+
+        const healthRatio = getVehicleHealthRatio(vehicle);
+        const diffToAttacker = getDiffToPosition(vehicle, attacker.position());
+        const absDiffToAttacker = Math.abs(diffToAttacker);
+
+        const frontBlocked = isFrontRayBlocked(vehicle);
+        const speed = getHorizontalSpeed(vehicle);
+
+        debugDriving(
+            vehicle,
+            `PANIC smokeAt=${SMOKE_HEALTH_RATIO.toFixed(2)} hp=${healthRatio.toFixed(2)} warning=${vehicleHasLowHealthWarning(vehicle)} dist=${distance.toFixed(1)}/${followRange.toFixed(1)} attacker=${attacker.getName().getString()} diff=${diffToAttacker.toFixed(1)} front=${frontBlocked} speed=${speed.toFixed(2)}`
+        );
+
+        // Do not panic-drive straight into an obstacle.
+        const frontBlockedTicks = updateFrontBlockedTicks(vehicle, frontBlocked);
+
+        if (frontBlocked) {
+            const leftBlocked = isFrontLeftRayBlocked(vehicle);
+            const rightBlocked = isFrontRightRayBlocked(vehicle);
+
+            chooseAvoidTurnDirection(vehicle, leftBlocked, rightBlocked);
+
+            vehicle.setForwardInputDown(false);
+            vehicle.setBackInputDown(false);
+            applyAvoidTurn(vehicle);
+
+            if (frontBlockedTicks >= 10) {
+                data.putInt("sbw_ai_front_blocked_ticks", 0);
+
+                const reverseTicks = Math.ceil(getVehicleRayDistance(vehicle) * 2);
+                data.putInt("sbw_ai_reverse_ticks", reverseTicks);
+
+                vehicle.setForwardInputDown(false);
+                vehicle.setBackInputDown(true);
+                applyAvoidTurn(vehicle);
+            }
+
+            updateStuckTicks(vehicle, false);
+            return false;
+        }
+
+        // If attacker is in front-ish, reverse away.
+        if (absDiffToAttacker < 100) {
+            vehicle.setForwardInputDown(false);
+            vehicle.setBackInputDown(true);
+
+            applyReverseAwayFromTarget(vehicle, diffToAttacker);
+
+            updateStuckTicks(vehicle, true);
+            return true;
+        }
+
+        // If attacker is behind-ish, drive forward away.
+        const awayPos = getAwayPositionFromEntity(vehicle, attacker);
+        const diffAway = getDiffToPosition(vehicle, awayPos);
+        const absDiffAway = Math.abs(diffAway);
+
+        steerTowardDiff(vehicle, diffAway, absDiffAway);
+
+        if (absDiffAway < PANIC_FORWARD_ANGLE) {
+            vehicle.setForwardInputDown(true);
+            vehicle.setBackInputDown(false);
+
+            const stuckTicks = updateStuckTicks(vehicle, true);
+
+            if (stuckTicks >= 10) {
+                data.putInt("sbw_ai_stuck_ticks", 0);
+
+                const reverseTicks = Math.ceil(getVehicleRayDistance(vehicle) * 2);
+                data.putInt("sbw_ai_reverse_ticks", reverseTicks);
+
+                vehicle.setForwardInputDown(false);
+                vehicle.setBackInputDown(true);
+                applyAvoidTurn(vehicle);
+
+                return false;
+            }
+
+            return true;
+        }
+
+        assistedCreepForward(vehicle);
+        updateStuckTicks(vehicle, true);
+        return true;
+    }
+
+    function getAwayPositionFromEntity(vehicle, entity) {
+        const vx = vehicle.getX();
+        const vy = vehicle.getY();
+        const vz = vehicle.getZ();
+
+        const ex = entity.getX();
+        const ez = entity.getZ();
+
+        return new $Vec3(
+            vx + (vx - ex),
+            vy,
+            vz + (vz - ez)
+        );
+    }
+
+    function getVehicleHealthRatio(vehicle) {
+        const health = getVehicleHealth(vehicle);
+        const maxHealth = getVehicleMaxHealth(vehicle);
+
+        if (health < 0 || maxHealth <= 0) return 1.0;
+
+        return health / maxHealth;
+    }
+
+    function getVehicleHealth(vehicle) {
+        try {
+            return vehicle.getEntityData().get($VehicleEntity.HEALTH);
+        } catch (error) {
+        }
+
+        try {
+            return vehicle.health;
+        } catch (error) {
+        }
+
+        try {
+            return vehicle.getHealth();
+        } catch (error) {
+        }
+
+        return -1;
+    }
+
+    function getVehicleMaxHealth(vehicle) {
+        try {
+            return vehicle.getMaxHealth();
+        } catch (error) {
+            return -1;
+        }
+    }
+
+    /** @param {$VehicleEntity} vehicle */
+    function getVehicleLastAttackerUuid(vehicle) {
+        const uuid = String(vehicle.getEntityData().get($VehicleEntity.LAST_ATTACKER_UUID));
+
+        if (uuid && uuid != "" && uuid != "undefined") {
+            return String(uuid);
+        }
+
+        return "";
+    }
+
+    /** @param {$VehicleEntity} vehicle */
+    function getLastAttackerEntity(vehicle) {
+        const uuidString = getVehicleLastAttackerUuid(vehicle);
+
+        if (!uuidString) return null;
+
+        try {
+            return vehicle.level.getEntityByUUID(uuidString);
+        } catch (error) {
+            return null;
+        }
+    }
+
     function getFlatRight(vehicle) {
         const f = getFlatForward(vehicle);
 
@@ -504,16 +760,6 @@
 
     function isRecoveringFromCollision(vehicle) {
         return vehicle.getPersistentData().getInt("sbw_ai_collision_recovery") > 0;
-    }
-
-    /** @param {$VehicleEntity} vehicle */
-    function getVehicleAABB(vehicle) {
-        var deltaMovement = vehicle.getDeltaMovement();
-        var aabb = $VehicleMotionUtils.INSTANCE.calculateCombinedAABBOptimized(vehicle)
-            .inflate(0.25, 0.0, 0.25)
-            .move(deltaMovement.x(), deltaMovement.y(), deltaMovement.z())
-            .move(0.0, 0.5, 0.0)
-        return aabb;
     }
 
     function holdVehicle(vehicle) {

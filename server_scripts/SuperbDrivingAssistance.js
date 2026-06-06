@@ -37,7 +37,6 @@
     const RAY_MIN_HALF_WIDTH = 0.35;
     const RAY_DEBUG_STEPS = 4;
 
-    const RAY_REAR_START_EXTRA = 0.25;
     const RAY_FRONT_END_EXTRA = 0.75;
     const RAY_SIDE_MARGIN = 0.10;
 
@@ -64,6 +63,9 @@
 
     // Per-tick local cache. Avoids rescanning OBBs 3-8 times during one vehicle tick.
     const SENSOR_OBB_CACHE = {};
+
+    // Less for more narrow angles
+    const TURN_ANGLE_THRESHOLD = 6;
 
     const { $ClipContext } = require("@package/net/minecraft/world/level");
     const { $UUID } = require("@package/java/util");
@@ -838,8 +840,7 @@
         let rayDirection = normalizeFlatDirection(flatDirection);
         let sideAxis = getRightFromFlatDirection(rayDirection);
 
-        // Support radius of the collision OBB along the requested probe direction.
-        // This makes diagonal probes use the correct front/rear span instead of a world AABB guess.
+        // Support radius from center to the tested face in this exact direction.
         let halfForward =
             Math.abs(dotFlat(rayDirection, axisX)) * ex
             + Math.abs(dotFlat(rayDirection, axisZ)) * ez;
@@ -847,17 +848,6 @@
         let halfWidth =
             Math.abs(dotFlat(sideAxis, axisX)) * ex
             + Math.abs(dotFlat(sideAxis, axisZ)) * ez;
-
-        let rearStartOffset = -(halfForward + RAY_REAR_START_EXTRA);
-        let frontOffset = halfForward;
-
-        let distanceFromRayStartToVehicleFront =
-            frontOffset - rearStartOffset;
-
-        let rayDistance =
-            distanceFromRayStartToVehicleFront
-            + probeDistance
-            + RAY_FRONT_END_EXTRA;
 
         let usableHalfWidth = Math.max(
             RAY_MIN_HALF_WIDTH,
@@ -884,23 +874,26 @@
             heightYs.push(point.y());
         }
 
-        let rayStartCenter = new $Vec3(
-            center.x() + rayDirection.x() * rearStartOffset,
-            center.y(),
-            center.z() + rayDirection.z() * rearStartOffset
-        );
+        // Center-start ray:
+        // center -> tested face -> probe distance past tested face.
+        let distanceFromRayStartToVehicleFace = Math.max(halfForward, 0.001);
+
+        let rayDistance =
+            distanceFromRayStartToVehicleFace
+            + probeDistance
+            + RAY_FRONT_END_EXTRA;
 
         return {
-            source: "collisionObb",
+            source: "collisionObbCenter",
             box: null,
             center: center,
-            rayStartCenter: rayStartCenter,
+            rayStartCenter: center,
             right: sideAxis,
             sideOffsets: sideOffsets,
             heightYs: heightYs,
             rayDistance: rayDistance,
-            distanceFromRayStartToVehicleFront: distanceFromRayStartToVehicleFront,
-            halfForward: Math.max(halfForward, 0.001),
+            distanceFromRayStartToVehicleFront: distanceFromRayStartToVehicleFace,
+            halfForward: distanceFromRayStartToVehicleFace,
             halfWidth: usableHalfWidth
         };
     }
@@ -923,17 +916,6 @@
             RAY_MIN_HALF_WIDTH
         );
 
-        let rearStartOffset = -(halfForward + RAY_REAR_START_EXTRA);
-        let frontOffset = halfForward;
-
-        let distanceFromRayStartToVehicleFront =
-            frontOffset - rearStartOffset;
-
-        let rayDistance =
-            distanceFromRayStartToVehicleFront
-            + probeDistance
-            + RAY_FRONT_END_EXTRA;
-
         let sideOffsets = [];
 
         for (let fraction of RAY_SIDE_FRACTIONS) {
@@ -947,29 +929,30 @@
             heightYs.push(box.minY + height * fraction);
         }
 
-        let rayStartCenter = new $Vec3(
-            center.x() + rayDirection.x() * rearStartOffset,
-            center.y(),
-            center.z() + rayDirection.z() * rearStartOffset
-        );
+        let distanceFromRayStartToVehicleFace = Math.max(halfForward, 0.001);
+
+        let rayDistance =
+            distanceFromRayStartToVehicleFace
+            + probeDistance
+            + RAY_FRONT_END_EXTRA;
 
         return {
-            source: "fallbackAabb",
+            source: "fallbackAabbCenter",
             box: box,
             center: center,
-            rayStartCenter: rayStartCenter,
+            rayStartCenter: center,
             right: sideAxis,
             sideOffsets: sideOffsets,
             heightYs: heightYs,
             rayDistance: rayDistance,
-            distanceFromRayStartToVehicleFront: distanceFromRayStartToVehicleFront,
+            distanceFromRayStartToVehicleFront: distanceFromRayStartToVehicleFace,
             halfForward: halfForward,
-            halfWidth: halfWidth
+            halfWidth: halfWidth + RAY_SIDE_MARGIN
         };
     }
 
 
-    function castBlockRay(vehicle, from, to, probeDistance, label, distanceFromRayStartToVehicleFront) {
+    function castBlockRay(vehicle, from, to, probeDistance, label, distanceFromRayStartToVehicleFace) {
         let hit = null;
         let ratio = 1.0;
         let blocked = false;
@@ -1000,15 +983,18 @@
 
                 let hitDistanceFromRayStart = horizontalDistanceBetween(from, hitLocation);
 
-                let clearDistanceInFront =
-                    hitDistanceFromRayStart - distanceFromRayStartToVehicleFront;
+                // Center-start math:
+                // Anything before the tested face means the vehicle is already touching/overlapping
+                // a block in that movement direction, so clearance is 0.
+                let clearDistancePastFace =
+                    hitDistanceFromRayStart - distanceFromRayStartToVehicleFace;
 
                 if (probeDistance > 0.001) {
-                    ratio = clamp(clearDistanceInFront / probeDistance, 0.0, 1.0);
+                    ratio = clamp(clearDistancePastFace / probeDistance, 0.0, 1.0);
                 }
 
-                if (clearDistanceInFront < 0.0) {
-                    typeName = typeName + "_INSIDE_BODY_SPAN";
+                if (clearDistancePastFace < 0.0) {
+                    typeName = typeName + "_BEFORE_TESTED_FACE";
                 }
             }
         } catch (error) {
@@ -1364,9 +1350,9 @@
 
         // Escape steering, not chase steering.
         // If the vehicle turns the wrong way in-game, swap assistedLeft/assistedRight here.
-        if (diff < -12) {
+        if (diff < -TURN_ANGLE_THRESHOLD) {
             assistedLeft(vehicle);
-        } else if (diff > 12) {
+        } else if (diff > TURN_ANGLE_THRESHOLD) {
             assistedRight(vehicle);
         } else {
             vehicle.setLeftInputDown(false);
@@ -1552,9 +1538,9 @@
     // -------------------------------------------------------------------------
 
     function steerTowardDiff(vehicle, diff, absDiff) {
-        if (absDiff > 12) {
-            if (diff < -12) assistedLeft(vehicle);
-            if (diff > 12) assistedRight(vehicle);
+        if (absDiff > TURN_ANGLE_THRESHOLD) {
+            if (diff < -TURN_ANGLE_THRESHOLD) assistedLeft(vehicle);
+            if (diff > TURN_ANGLE_THRESHOLD) assistedRight(vehicle);
         } else {
             vehicle.setLeftInputDown(false);
             vehicle.setRightInputDown(false);
@@ -1644,9 +1630,9 @@
 
         // For reverse driving, steering may need to be opposite.
         // If it turns the wrong way in-game, swap these two.
-        if (diff < -12) {
+        if (diff < -TURN_ANGLE_THRESHOLD) {
             assistedRight(vehicle);
-        } else if (diff > 12) {
+        } else if (diff > TURN_ANGLE_THRESHOLD) {
             assistedLeft(vehicle);
         } else {
             vehicle.setLeftInputDown(false);

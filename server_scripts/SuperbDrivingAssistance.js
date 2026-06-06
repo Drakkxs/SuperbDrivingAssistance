@@ -28,6 +28,28 @@
     const MOVE_PROBE_DISTANCE_MAX = 5.0;
     const MOVE_PROBE_LENGTH_MULTIPLIER = 0.65;
 
+    // Ray fan tuning.
+    // Ray fan = eyes.
+    // vCollide = final body check.
+    const MOVE_PROBE_SPEED_LOOKAHEAD = 8.0;
+
+    const RAY_SIDE_INSET = 0.20;
+    const RAY_MIN_HALF_WIDTH = 0.35;
+    const RAY_DEBUG_STEPS = 4;
+
+    const RAY_REAR_START_EXTRA = 0.25;
+    const RAY_FRONT_END_EXTRA = 0.75;
+    const RAY_SIDE_MARGIN = 0.10;
+
+    // Debug mode:
+    const RAY_SIDE_FRACTIONS = [-1.0, -0.66, -0.33, 0.0, 0.33, 0.66, 1.0];
+
+    // Later, once calibrated:
+    // const RAY_SIDE_FRACTIONS = [-0.90, -0.45, 0.0, 0.45, 0.90];
+
+    const RAY_HEIGHT_FRACTIONS = [0.30, 0.58, 0.82];
+
+
     // If Superb Warfare allows less than this much of the requested movement,
     // treat the path as blocked.
     const MOVE_BLOCKED_RATIO = 0.55;
@@ -40,6 +62,10 @@
     const OBSTACLE_REVERSE_MAX_TICKS = 40;
     const OBSTACLE_REVERSE_TICKS_PER_BLOCK = 5;
 
+    // Per-tick local cache. Avoids rescanning OBBs 3-8 times during one vehicle tick.
+    const SENSOR_OBB_CACHE = {};
+
+    const { $ClipContext } = require("@package/net/minecraft/world/level");
     const { $UUID } = require("@package/java/util");
     const { $Player } = require("@package/net/minecraft/world/entity/player");
     const { $PlayerInteractEvent$EntityInteract } = require("@package/net/neoforged/neoforge/event/entity/player");
@@ -51,18 +77,17 @@
     const { $Mth } = require("@package/net/minecraft/util");
     const { $Vec3 } = require("@package/net/minecraft/world/phys");
 
-
+    // Utility for debug used to place
     NativeEvents.onEvent($PlayerInteractEvent$EntityInteract, (event) => {
 
-        const player = event.getEntity();
+        let player = event.getEntity();
         if (player instanceof $Player) {
-
             if (player.level.isClientSide()) return;
 
-            const lead = player.getMainHandItem().copy();
+            let lead = player.getMainHandItem().copy();
             if (lead && lead.getIdLocation() === Item.of("minecraft:lead").getIdLocation()) {
 
-                const target = event.getTarget();
+                let target = event.getTarget();
                 if (target instanceof $VehicleEntity) {
 
                     player.level.runCommand(`superbwarfare ride ${lead.getCustomData().getString("sbw_vehicle_rider")} ${target.getUuid()}`)
@@ -81,27 +106,25 @@
 
     NativeEvents.onEvent($EntityTickEvent$Pre, (event) => {
 
-        const driver = event.getEntity();
+        let driver = event.getEntity();
 
         if (!(driver instanceof $LivingEntity)) return;
         if (driver.isPlayer()) return;
         if (driver.level.isClientSide()) return;
 
-        const vehicle = driver.getVehicle();
+        let vehicle = driver.getVehicle();
 
         if (vehicle == null) return;
         if (!(vehicle instanceof $VehicleEntity)) return;
         if (vehicle.getFirstPassenger() != driver) return;
-
         vehicle.getPersistentData().putBoolean("sbw_ai_is_hostile", (driver instanceof $Monster));
-
         stopVehicle(vehicle, driver);
         moveVehicle(vehicle, driver);
     });
 
 
     function moveVehicle(vehicle, driver) {
-        const followRange = driver.getAttributeValue("minecraft:generic.follow_range");
+        let followRange = driver.getAttributeValue("minecraft:generic.follow_range");
 
         // Safety system runs first.
         // This does not care whether the mob driver has a normal target.
@@ -109,18 +132,18 @@
             return;
         }
 
-        const target = driver.getTarget ? driver.getTarget() : null;
+        let target = driver.getTarget ? driver.getTarget() : null;
         if (!(target instanceof $LivingEntity)) return;
 
         updateRecoveryCooldown(vehicle);
         updateDrivingTimers(vehicle);
 
-        const diff = getDiffToPosition(vehicle, target.position());
-        const absDiff = Math.abs(diff);
+        let diff = getDiffToPosition(vehicle, target.position());
+        let absDiff = Math.abs(diff);
 
         steerTowardDiff(vehicle, diff, absDiff);
 
-        const distance = vehicle.distanceToEntity(target);
+        let distance = vehicle.distanceToEntity(target);
 
         assistedDrive(vehicle, distance, followRange, diff, absDiff);
     }
@@ -133,9 +156,9 @@
      * @param {Number} followRange
      */
     function tryPanicEscape(vehicle, driver, followRange) {
-        const healthRatio = getVehicleHealthRatio(vehicle);
-        const warning = vehicleHasLowHealthWarning(vehicle);
-        const attackerUuid = getVehicleLastAttackerUuid(vehicle);
+        let healthRatio = getVehicleHealthRatio(vehicle);
+        let warning = vehicleHasLowHealthWarning(vehicle);
+        let attackerUuid = getVehicleLastAttackerUuid(vehicle);
 
         debugDriving(
             vehicle,
@@ -146,7 +169,7 @@
         if (healthRatio > SMOKE_HEALTH_RATIO) return false;
         if (attackerUuid == "") return false;
 
-        const attacker = getLastAttackerEntity(vehicle);
+        let attacker = getLastAttackerEntity(vehicle);
 
         // Last Attacker cannot equal a passanger of the vehicle.
         // Last Attacker cannot be within the vehicles bounding.
@@ -159,7 +182,7 @@
             return false;
         }
 
-        const panicDistance = vehicle.distanceToEntity(attacker);
+        let panicDistance = vehicle.distanceToEntity(attacker);
 
         if (panicDistance > followRange) {
             debugDriving(
@@ -179,26 +202,26 @@
     function assistedPanicDrive(vehicle, attacker, distance, followRange) {
         updateDrivingTimers(vehicle);
 
-        const healthRatio = getVehicleHealthRatio(vehicle);
-        const diffToAttacker = getDiffToPosition(vehicle, attacker.position());
-        const absDiffToAttacker = Math.abs(diffToAttacker);
+        let healthRatio = getVehicleHealthRatio(vehicle);
+        let diffToAttacker = getDiffToPosition(vehicle, attacker.position());
+        let absDiffToAttacker = Math.abs(diffToAttacker);
 
-        const speed = getHorizontalSpeed(vehicle);
+        let speed = getHorizontalSpeed(vehicle);
 
         // If attacker is in front-ish, reverse away.
         if (absDiffToAttacker < 100) {
-            const backProbe = getBackMoveProbe(vehicle);
+            let backProbe = getBackMoveProbe(vehicle);
 
             debugDriving(
                 vehicle,
-                `PANIC reverse hp=${healthRatio.toFixed(2)} dist=${distance.toFixed(1)}/${followRange.toFixed(1)} attacker=${attacker.getName().getString()} diff=${diffToAttacker.toFixed(1)} backFit=${backProbe.ratio.toFixed(2)} speed=${speed.toFixed(2)}`
+                `PANIC reverse hp=${healthRatio.toFixed(2)} dist=${distance.toFixed(1)}/${followRange.toFixed(1)} attacker=${attacker.getName().getString()} diff=${diffToAttacker.toFixed(1)} backFit=${backProbe.ratio.toFixed(2)} ray=${backProbe.rayRatio.toFixed(2)} body=${backProbe.bodyRatio.toFixed(2)} speed=${speed.toFixed(2)}`
             );
 
             if (backProbe.blocked) {
                 // Backing up would collide. Do not ram backward forever.
                 // Pick the better forward diagonal and rotate.
-                const leftProbe = getFrontLeftMoveProbe(vehicle);
-                const rightProbe = getFrontRightMoveProbe(vehicle);
+                let leftProbe = getFrontLeftMoveProbe(vehicle);
+                let rightProbe = getFrontRightMoveProbe(vehicle);
 
                 chooseAvoidTurnDirectionFromProbes(vehicle, leftProbe, rightProbe);
 
@@ -219,18 +242,18 @@
         }
 
         // Attacker is behind-ish, so drive forward away.
-        const awayPos = getAwayPositionFromEntity(vehicle, attacker);
-        const diffAway = getDiffToPosition(vehicle, awayPos);
-        const absDiffAway = Math.abs(diffAway);
+        let awayPos = getAwayPositionFromEntity(vehicle, attacker);
+        let diffAway = getDiffToPosition(vehicle, awayPos);
+        let absDiffAway = Math.abs(diffAway);
 
         steerTowardDiff(vehicle, diffAway, absDiffAway);
 
-        const frontProbe = getFrontMoveProbe(vehicle);
-        const frontBlockedTicks = updateFrontBlockedTicks(vehicle, frontProbe.blocked);
+        let frontProbe = getFrontMoveProbe(vehicle);
+        let frontBlockedTicks = updateFrontBlockedTicks(vehicle, frontProbe.blocked);
 
         debugDriving(
             vehicle,
-            `PANIC forward hp=${healthRatio.toFixed(2)} dist=${distance.toFixed(1)}/${followRange.toFixed(1)} attacker=${attacker.getName().getString()} awayDiff=${diffAway.toFixed(1)} frontFit=${frontProbe.ratio.toFixed(2)} speed=${speed.toFixed(2)}`
+            `PANIC forward hp=${healthRatio.toFixed(2)} dist=${distance.toFixed(1)}/${followRange.toFixed(1)} attacker=${attacker.getName().getString()} awayDiff=${diffAway.toFixed(1)} frontFit=${frontProbe.ratio.toFixed(2)} ray=${frontProbe.rayRatio.toFixed(2)} body=${frontProbe.bodyRatio.toFixed(2)} speed=${speed.toFixed(2)}`
         );
 
         if (frontProbe.blocked) {
@@ -241,7 +264,7 @@
             vehicle.setForwardInputDown(true);
             vehicle.setBackInputDown(false);
 
-            const stuckTicks = updateStuckTicks(vehicle, true);
+            let stuckTicks = updateStuckTicks(vehicle, true);
 
             if (stuckTicks >= 10) {
                 startObstacleReverse(vehicle);
@@ -258,49 +281,87 @@
 
 
     function assistedDrive(vehicle, distance, followRange, diff, absDiff) {
-        const data = vehicle.getPersistentData();
+        let data = vehicle.getPersistentData();
 
         let reverseTicks = data.getInt("sbw_ai_reverse_ticks");
         let reverseAlignTicks = data.getInt("sbw_ai_reverse_align_ticks");
 
-        const frontProbe = getFrontMoveProbe(vehicle);
-        const speed = getHorizontalSpeed(vehicle);
-        const driveState = getDriveAlignmentState(absDiff);
+        let frontProbe = getFrontMoveProbe(vehicle);
+        let speed = getHorizontalSpeed(vehicle);
+        let driveState = getDriveAlignmentState(absDiff);
 
         debugDriving(
             vehicle,
-            `state=${driveState} diff=${diff.toFixed(1)} frontFit=${frontProbe.ratio.toFixed(2)} speed=${speed.toFixed(2)} reverse=${reverseTicks} align=${reverseAlignTicks} alignCd=${data.getInt("sbw_ai_reverse_align_cooldown")} creep=${data.getInt("sbw_ai_creep_forward_ticks")} stuck=${data.getInt("sbw_ai_stuck_ticks")}`
+            `state=${driveState} diff=${diff.toFixed(1)} fit=${frontProbe.ratio.toFixed(2)} R=${frontProbe.rayRatio.toFixed(2)} B=${frontProbe.bodyRatio.toFixed(2)} rays=${frontProbe.rays.length} speed=${speed.toFixed(2)} stuck=${data.getInt("sbw_ai_stuck_ticks")}`
         );
 
         // Active reverse-align maneuver.
-        // This is limited and cannot run forever.
+        // This is limited, but it should not cancel too eagerly.
+        // If it cancels before setting BackInputDown, the vehicle only rolls.
         if (reverseAlignTicks > 0) {
             data.putInt("sbw_ai_reverse_align_ticks", reverseAlignTicks - 1);
+
+            let elapsedAlignTicks = REVERSE_ALIGN_MAX_TICKS - reverseAlignTicks;
 
             if (absDiff < 45) {
                 stopReverseAlign(vehicle);
                 holdVehicle(vehicle);
                 updateStuckTicks(vehicle, false);
+
+                debugDriving(
+                    vehicle,
+                    `ALIGN stop angle diff=${diff.toFixed(1)}`
+                );
+
                 return false;
             }
 
-            if (distance > followRange * 0.6) {
+            // Old value was followRange * 0.6.
+            // That is very aggressive and can cancel reverse-align before the vehicle actually backs up.
+            // Let reverse-align commit briefly before far-distance cancellation is allowed.
+            if (elapsedAlignTicks > 10 && distance > followRange * 0.9) {
                 stopReverseAlign(vehicle);
                 holdVehicle(vehicle);
                 updateStuckTicks(vehicle, false);
+
+                debugDriving(
+                    vehicle,
+                    `ALIGN stop far dist=${distance.toFixed(1)}/${followRange.toFixed(1)}`
+                );
+
                 return false;
             }
 
-            const backProbe = getBackMoveProbe(vehicle);
+            let backProbe = getBackMoveProbe(vehicle);
 
-            if (backProbe.blocked) {
+            // Important:
+            // Do not let vCollide alone kill reverse-align if rays say the path is open.
+            // vCollide can be conservative because it is using the real body/white box.
+            // For reverse-align, rays are the "eyes"; vCollide is a warning, not always a hard veto.
+            let backRayBlocked = backProbe.rayRatio < MOVE_BLOCKED_RATIO;
+            let backBodyBlocked = backProbe.bodyRatio < MOVE_BLOCKED_RATIO;
+            let backReallyBlocked = backRayBlocked && backBodyBlocked;
+
+            if (backReallyBlocked) {
                 stopReverseAlign(vehicle);
                 holdVehicle(vehicle);
+                applyAvoidTurn(vehicle);
                 updateStuckTicks(vehicle, false);
+
+                debugDriving(
+                    vehicle,
+                    `ALIGN stop backBlocked ray=${backProbe.rayRatio.toFixed(2)} body=${backProbe.bodyRatio.toFixed(2)}`
+                );
+
                 return false;
             }
 
             applyReverseAlign(vehicle, diff);
+
+            debugDriving(
+                vehicle,
+                `ALIGN reverse diff=${diff.toFixed(1)} ray=${backProbe.rayRatio.toFixed(2)} body=${backProbe.bodyRatio.toFixed(2)} speed=${getHorizontalSpeed(vehicle).toFixed(2)}`
+            );
 
             updateStuckTicks(vehicle, true);
             return true;
@@ -317,7 +378,7 @@
         if (reverseTicks > 0) {
             data.putInt("sbw_ai_reverse_ticks", reverseTicks - 1);
 
-            const backProbe = getBackMoveProbe(vehicle);
+            let backProbe = getBackMoveProbe(vehicle);
 
             if (backProbe.blocked) {
                 data.putInt("sbw_ai_reverse_ticks", 0);
@@ -336,7 +397,7 @@
             return true;
         }
 
-        const frontBlockedTicks = updateFrontBlockedTicks(vehicle, frontProbe.blocked);
+        let frontBlockedTicks = updateFrontBlockedTicks(vehicle, frontProbe.blocked);
 
         if (frontProbe.blocked) {
             return handleBlockedForward(vehicle, frontBlockedTicks);
@@ -367,7 +428,7 @@
         vehicle.setForwardInputDown(true);
         vehicle.setBackInputDown(false);
 
-        const stuckTicks = updateStuckTicks(vehicle, true);
+        let stuckTicks = updateStuckTicks(vehicle, true);
 
         if (stuckTicks >= 10) {
             startObstacleReverse(vehicle);
@@ -379,10 +440,10 @@
 
 
     function handleBlockedForward(vehicle, frontBlockedTicks) {
-        const leftProbe = getFrontLeftMoveProbe(vehicle);
-        const rightProbe = getFrontRightMoveProbe(vehicle);
+        let leftProbe = getFrontLeftMoveProbe(vehicle);
+        let rightProbe = getFrontRightMoveProbe(vehicle);
 
-        const turnDirection = chooseAvoidTurnDirectionFromProbes(vehicle, leftProbe, rightProbe);
+        let turnDirection = chooseAvoidTurnDirectionFromProbes(vehicle, leftProbe, rightProbe);
 
         vehicle.setForwardInputDown(false);
         vehicle.setBackInputDown(false);
@@ -410,7 +471,7 @@
 
 
     function startObstacleReverse(vehicle) {
-        const data = vehicle.getPersistentData();
+        let data = vehicle.getPersistentData();
 
         data.putInt("sbw_ai_stuck_ticks", 0);
         data.putInt("sbw_ai_reverse_ticks", getObstacleReverseTicks(vehicle));
@@ -421,7 +482,7 @@
 
 
     function getObstacleReverseTicks(vehicle) {
-        const ticks = Math.ceil(getVehicleProbeDistance(vehicle) * OBSTACLE_REVERSE_TICKS_PER_BLOCK);
+        let ticks = Math.ceil(getVehicleProbeDistance(vehicle) * OBSTACLE_REVERSE_TICKS_PER_BLOCK);
 
         return clamp(
             ticks,
@@ -441,13 +502,64 @@
 
 
     // -------------------------------------------------------------------------
-    // vCollide movement probes
+    // Sensor Core V2: collision-OBB ray fan + vCollide body probe
     // -------------------------------------------------------------------------
+
+    function getVehicleProbeDistance(vehicle) {
+        let vehicleLength = getVehicleSensorLength(vehicle);
+        let speed = getHorizontalSpeed(vehicle);
+
+        let distance = vehicleLength * MOVE_PROBE_LENGTH_MULTIPLIER
+            + speed * MOVE_PROBE_SPEED_LOOKAHEAD;
+
+        return clamp(
+            distance,
+            MOVE_PROBE_DISTANCE_MIN,
+            MOVE_PROBE_DISTANCE_MAX
+        );
+    }
+
+
+    function getVehicleSensorLength(vehicle) {
+        let collisionObb = getKubeCollisionOBB(vehicle);
+
+        if (collisionObb != null) {
+            let ext = getObbExtents(collisionObb);
+
+            let x = Math.abs(component(ext, "x"));
+            let z = Math.abs(component(ext, "z"));
+
+            // In SuperbWarfare OBB convention, local Z is the front/back axis.
+            // If that ever comes back invalid, fall back to the larger horizontal extent.
+            let length = Math.max(z * 2.0, Math.max(x, z) * 2.0);
+
+            if (length > 0.01) {
+                return length;
+            }
+        }
+
+        try {
+            let box = getBestVehicleSensorBox(vehicle);
+            let xSize = box.maxX - box.minX;
+            let zSize = box.maxZ - box.minZ;
+
+            return Math.max(xSize, zSize, 2.0);
+        } catch (error) {
+        }
+
+        try {
+            return Math.max(vehicle.bbWidth, vehicle.bbHeight, 2.0);
+        } catch (error2) {
+        }
+
+        return 2.0;
+    }
+
 
     function getFrontMoveProbe(vehicle) {
         return getMovementProbe(
             vehicle,
-            getFlatForward(vehicle),
+            getVehicleFlatFront(vehicle),
             getVehicleProbeDistance(vehicle),
             "front"
         );
@@ -483,50 +595,50 @@
         );
     }
 
-    /**
-     * @param {$VehicleEntity} vehicle
-     * @param {$Vec3} direction
-     * @param {number} distance
-     * @param {string} label
-     */
-    function getMovementProbe(vehicle, direction, distance, label) {
-        const flat = normalizeFlatDirection(direction);
 
-        const wanted = new $Vec3(
+    function getMovementProbe(vehicle, direction, distance, label) {
+        let flat = normalizeFlatDirection(direction);
+
+        let wanted = new $Vec3(
             flat.x() * distance,
             0.0,
             flat.z() * distance
         );
 
-        let allowed = wanted;
+        // Eyes first.
+        let rayProbe = getRayFanProbe(vehicle, flat, distance, label);
 
-        try {
-            // This is the important part.
-            // vCollide asks Superb Warfare's own OBB/world collision solver
-            // how much of this movement would actually be allowed.
-            allowed = vehicle.vCollide(wanted);
-        } catch (error) {
-            allowed = wanted;
-        }
+        // Body check second.
+        let bodyProbe = getVCollideProbe(vehicle, wanted, flat);
 
-        const wantedDistance = horizontalLength(wanted);
-        const allowedDistance = horizontalLength(allowed);
+        // Normal driving uses the stricter answer.
+        // Reverse-align has separate logic that can treat vCollide as advisory.
+        let ratio = clamp(
+            Math.min(rayProbe.ratio, bodyProbe.ratio),
+            0.0,
+            1.0
+        );
 
-        let ratio = 1.0;
-        if (wantedDistance > 0.001) {
-            ratio = allowedDistance / wantedDistance;
-        }
+        let allowed = new $Vec3(
+            wanted.x() * ratio,
+            wanted.y() * ratio,
+            wanted.z() * ratio
+        );
 
-        ratio = clamp(ratio, 0.0, 1.0);
-
-        const probe = {
+        let probe = {
             label: label,
             wanted: wanted,
             allowed: allowed,
-            wantedDistance: wantedDistance,
-            allowedDistance: allowedDistance,
+            wantedDistance: horizontalLength(wanted),
+            allowedDistance: horizontalLength(allowed),
             ratio: ratio,
-            blocked: ratio < MOVE_BLOCKED_RATIO
+            rayRatio: rayProbe.ratio,
+            bodyRatio: bodyProbe.ratio,
+            blocked: ratio < MOVE_BLOCKED_RATIO,
+            rays: rayProbe.rays,
+            bodyAllowed: bodyProbe.allowed,
+            frame: rayProbe.frame,
+            source: rayProbe.source
         };
 
         drawMovementProbe(vehicle, probe);
@@ -536,17 +648,17 @@
 
 
     function chooseAvoidTurnDirectionFromProbes(vehicle, leftProbe, rightProbe) {
-        const data = vehicle.getPersistentData();
+        let data = vehicle.getPersistentData();
 
         let current = getAvoidTurnDirection(vehicle);
 
-        const leftScore = leftProbe.ratio;
-        const rightScore = rightProbe.ratio;
+        let leftScore = getProbeAvoidScore(leftProbe);
+        let rightScore = getProbeAvoidScore(rightProbe);
 
         if (rightScore > leftScore + AVOID_SCORE_MARGIN) {
-            current = 1;
+            current = 1; // right
         } else if (leftScore > rightScore + AVOID_SCORE_MARGIN) {
-            current = -1;
+            current = -1; // left
         } else if (!rightProbe.blocked && leftProbe.blocked) {
             current = 1;
         } else if (!leftProbe.blocked && rightProbe.blocked) {
@@ -558,38 +670,606 @@
     }
 
 
-    function getVehicleProbeDistance(vehicle) {
-        let vehicleLength = 2.0;
+    function getProbeAvoidScore(probe) {
+        if (probe == null) return 0.0;
+
+        let score = probe.ratio;
+
+        // Slightly prefer paths where both eyes and body agree.
+        if (probe.rayRatio != null && probe.bodyRatio != null) {
+            score = Math.min(probe.rayRatio, probe.bodyRatio);
+        }
+
+        return clamp(score, 0.0, 1.0);
+    }
+
+
+    function getVCollideProbe(vehicle, wanted, flat) {
+        let allowed = wanted;
 
         try {
-            const aabb = $VehicleMotionUtils.INSTANCE.calculateCombinedAABBOptimized(vehicle);
-
-            const xSize = aabb.maxX - aabb.minX;
-            const zSize = aabb.maxZ - aabb.minZ;
-
-            vehicleLength = Math.max(xSize, zSize);
+            allowed = vehicle.vCollide(wanted);
         } catch (error) {
-            try {
-                vehicleLength = Math.max(vehicle.bbWidth, vehicle.bbHeight);
-            } catch (error2) {
-                vehicleLength = 2.0;
+            allowed = wanted;
+        }
+
+        let wantedDistance = horizontalLength(wanted);
+
+        let ratio = 1.0;
+
+        if (wantedDistance > 0.001) {
+            // Projection matters.
+            // If vCollide slides us sideways, that should not count as useful forward progress.
+            let progress = allowed.x() * flat.x() + allowed.z() * flat.z();
+            ratio = clamp(progress / wantedDistance, 0.0, 1.0);
+        }
+
+        return {
+            wanted: wanted,
+            allowed: allowed,
+            ratio: ratio
+        };
+    }
+
+
+    function getRayFanProbe(vehicle, flatDirection, distance, label) {
+        let frame = getRaySensorFrame(vehicle, flatDirection, distance);
+        let rays = [];
+
+        let bestRatio = 1.0;
+
+        for (let sideOffset of frame.sideOffsets) {
+            for (let heightY of frame.heightYs) {
+                let from = new $Vec3(
+                    frame.rayStartCenter.x() + frame.right.x() * sideOffset,
+                    heightY,
+                    frame.rayStartCenter.z() + frame.right.z() * sideOffset
+                );
+
+                let to = new $Vec3(
+                    from.x() + flatDirection.x() * frame.rayDistance,
+                    from.y(),
+                    from.z() + flatDirection.z() * frame.rayDistance
+                );
+
+                let ray = castBlockRay(
+                    vehicle,
+                    from,
+                    to,
+                    distance,
+                    label,
+                    frame.distanceFromRayStartToVehicleFront
+                );
+
+                rays.push(ray);
+
+                if (ray.ratio < bestRatio) {
+                    bestRatio = ray.ratio;
+                }
             }
         }
 
-        const speed = getHorizontalSpeed(vehicle);
+        debugRayFan(vehicle, label, frame, rays, bestRatio);
 
-        // Faster vehicles look a little farther ahead.
-        const distance = vehicleLength * MOVE_PROBE_LENGTH_MULTIPLIER + speed * 8.0;
+        return {
+            label: label,
+            source: frame.source,
+            ratio: clamp(bestRatio, 0.0, 1.0),
+            rays: rays,
+            frame: frame
+        };
+    }
 
-        // PostEdit: Faster Vehicles will look as far ahead as neccessary.
-        // Original:
-        // return clamp(
-        //     distance,
-        //     MOVE_PROBE_DISTANCE_MIN,
-        //     MOVE_PROBE_DISTANCE_MAX
-        // );
-        // Changed:
-        return distance;
+
+    function debugRayFan(vehicle, label, frame, rays, bestRatio) {
+        if (!DEBUG_DRIVING) return;
+        if (vehicle.tickCount % DEBUG_EVERY_TICKS != 0) return;
+
+        let blockedCount = 0;
+        let errorCount = 0;
+        let missCount = 0;
+        let typeSample = "none";
+        let errorSample = "";
+
+        for (let ray of rays) {
+            if (ray.blocked) blockedCount++;
+
+            if (ray.typeName == "ERROR") {
+                errorCount++;
+                errorSample = ray.errorText;
+            }
+
+            if (String(ray.typeName).indexOf("MISS") >= 0) {
+                missCount++;
+            }
+
+            typeSample = ray.typeName;
+        }
+
+        debugDriving(
+            vehicle,
+            `RAY ${label} src=${frame.source} rays=${rays.length} block=${blockedCount} miss=${missCount} err=${errorCount} ratio=${bestRatio.toFixed(2)} hf=${frame.halfForward.toFixed(2)} hw=${frame.halfWidth.toFixed(2)} type=${typeSample}`
+        );
+
+        if (errorCount > 0) {
+            debugDriving(
+                vehicle,
+                `RAYERR ${String(errorSample).substring(0, 90)}`
+            );
+        }
+    }
+
+
+    function getRaySensorFrame(vehicle, flatDirection, probeDistance) {
+        let collisionObb = getKubeCollisionOBB(vehicle);
+
+        if (collisionObb != null) {
+            return getCollisionObbRaySensorFrame(
+                vehicle,
+                collisionObb,
+                flatDirection,
+                probeDistance
+            );
+        }
+
+        return getFallbackAabbRaySensorFrame(
+            vehicle,
+            flatDirection,
+            probeDistance
+        );
+    }
+
+
+    function getCollisionObbRaySensorFrame(vehicle, obb, flatDirection, probeDistance) {
+        let center = vec3FromAny(obb.center);
+
+        let ext = getObbExtents(obb);
+
+        let ex = Math.abs(component(ext, "x"));
+        let ey = Math.abs(component(ext, "y"));
+        let ez = Math.abs(component(ext, "z"));
+
+        let axes = obb.getAxes();
+
+        let axisX = normalizeFlatDirection(vec3FromAny(getArrayLike(axes, 0)));
+        let axisY = vec3FromAny(getArrayLike(axes, 1));
+        let axisZ = normalizeFlatDirection(vec3FromAny(getArrayLike(axes, 2)));
+
+        let rayDirection = normalizeFlatDirection(flatDirection);
+        let sideAxis = getRightFromFlatDirection(rayDirection);
+
+        // Support radius of the collision OBB along the requested probe direction.
+        // This makes diagonal probes use the correct front/rear span instead of a world AABB guess.
+        let halfForward =
+            Math.abs(dotFlat(rayDirection, axisX)) * ex
+            + Math.abs(dotFlat(rayDirection, axisZ)) * ez;
+
+        let halfWidth =
+            Math.abs(dotFlat(sideAxis, axisX)) * ex
+            + Math.abs(dotFlat(sideAxis, axisZ)) * ez;
+
+        let rearStartOffset = -(halfForward + RAY_REAR_START_EXTRA);
+        let frontOffset = halfForward;
+
+        let distanceFromRayStartToVehicleFront =
+            frontOffset - rearStartOffset;
+
+        let rayDistance =
+            distanceFromRayStartToVehicleFront
+            + probeDistance
+            + RAY_FRONT_END_EXTRA;
+
+        let usableHalfWidth = Math.max(
+            RAY_MIN_HALF_WIDTH,
+            halfWidth + RAY_SIDE_MARGIN
+        );
+
+        let sideOffsets = [];
+
+        for (let fraction of RAY_SIDE_FRACTIONS) {
+            sideOffsets.push(usableHalfWidth * fraction);
+        }
+
+        let heightYs = [];
+
+        for (let fraction of RAY_HEIGHT_FRACTIONS) {
+            let localY = -ey + ey * 2.0 * fraction;
+
+            let point = new $Vec3(
+                center.x() + component(axisY, "x") * localY,
+                center.y() + component(axisY, "y") * localY,
+                center.z() + component(axisY, "z") * localY
+            );
+
+            heightYs.push(point.y());
+        }
+
+        let rayStartCenter = new $Vec3(
+            center.x() + rayDirection.x() * rearStartOffset,
+            center.y(),
+            center.z() + rayDirection.z() * rearStartOffset
+        );
+
+        return {
+            source: "collisionObb",
+            box: null,
+            center: center,
+            rayStartCenter: rayStartCenter,
+            right: sideAxis,
+            sideOffsets: sideOffsets,
+            heightYs: heightYs,
+            rayDistance: rayDistance,
+            distanceFromRayStartToVehicleFront: distanceFromRayStartToVehicleFront,
+            halfForward: Math.max(halfForward, 0.001),
+            halfWidth: usableHalfWidth
+        };
+    }
+
+
+    function getFallbackAabbRaySensorFrame(vehicle, flatDirection, probeDistance) {
+        let box = getBestVehicleSensorBox(vehicle);
+        let center = box.getCenter();
+
+        let rayDirection = normalizeFlatDirection(flatDirection);
+        let sideAxis = getRightFromFlatDirection(rayDirection);
+
+        let halfForward = Math.max(
+            getAabbFlatLengthAlong(box, rayDirection) * 0.5,
+            0.5
+        );
+
+        let halfWidth = Math.max(
+            getAabbFlatLengthAlong(box, sideAxis) * 0.5,
+            RAY_MIN_HALF_WIDTH
+        );
+
+        let rearStartOffset = -(halfForward + RAY_REAR_START_EXTRA);
+        let frontOffset = halfForward;
+
+        let distanceFromRayStartToVehicleFront =
+            frontOffset - rearStartOffset;
+
+        let rayDistance =
+            distanceFromRayStartToVehicleFront
+            + probeDistance
+            + RAY_FRONT_END_EXTRA;
+
+        let sideOffsets = [];
+
+        for (let fraction of RAY_SIDE_FRACTIONS) {
+            sideOffsets.push((halfWidth + RAY_SIDE_MARGIN) * fraction);
+        }
+
+        let height = Math.max(box.maxY - box.minY, 1.0);
+        let heightYs = [];
+
+        for (let fraction of RAY_HEIGHT_FRACTIONS) {
+            heightYs.push(box.minY + height * fraction);
+        }
+
+        let rayStartCenter = new $Vec3(
+            center.x() + rayDirection.x() * rearStartOffset,
+            center.y(),
+            center.z() + rayDirection.z() * rearStartOffset
+        );
+
+        return {
+            source: "fallbackAabb",
+            box: box,
+            center: center,
+            rayStartCenter: rayStartCenter,
+            right: sideAxis,
+            sideOffsets: sideOffsets,
+            heightYs: heightYs,
+            rayDistance: rayDistance,
+            distanceFromRayStartToVehicleFront: distanceFromRayStartToVehicleFront,
+            halfForward: halfForward,
+            halfWidth: halfWidth
+        };
+    }
+
+
+    function castBlockRay(vehicle, from, to, probeDistance, label, distanceFromRayStartToVehicleFront) {
+        let hit = null;
+        let ratio = 1.0;
+        let blocked = false;
+        let hitLocation = to;
+        let typeName = "NO_HIT";
+        let errorText = "";
+
+        try {
+            let context = new $ClipContext(
+                from,
+                to,
+                "collider",
+                "none",
+                vehicle
+            );
+
+            hit = vehicle.level.clip(context);
+
+            if (hit == null) {
+                typeName = "NULL";
+            } else {
+                typeName = String(hit.getType());
+            }
+
+            if (hit != null && typeName.indexOf("MISS") < 0) {
+                blocked = true;
+                hitLocation = hit.getLocation();
+
+                let hitDistanceFromRayStart = horizontalDistanceBetween(from, hitLocation);
+
+                let clearDistanceInFront =
+                    hitDistanceFromRayStart - distanceFromRayStartToVehicleFront;
+
+                if (probeDistance > 0.001) {
+                    ratio = clamp(clearDistanceInFront / probeDistance, 0.0, 1.0);
+                }
+
+                if (clearDistanceInFront < 0.0) {
+                    typeName = typeName + "_INSIDE_BODY_SPAN";
+                }
+            }
+        } catch (error) {
+            errorText = String(error);
+            typeName = "ERROR";
+
+            blocked = false;
+            ratio = 1.0;
+            hitLocation = to;
+        }
+
+        return {
+            label: label,
+            from: from,
+            to: to,
+            hit: hit,
+            hitLocation: hitLocation,
+            ratio: ratio,
+            blocked: blocked,
+            typeName: typeName,
+            errorText: errorText
+        };
+    }
+
+
+    function getKubeCollisionOBB(vehicle) {
+        let cacheKey = getVehicleCacheKey(vehicle);
+        let tick = vehicle.tickCount;
+
+        let cached = SENSOR_OBB_CACHE[cacheKey];
+
+        if (cached != null && cached.tick == tick) {
+            return cached.obb;
+        }
+
+        let result = null;
+
+        try {
+            vehicle.updateOBB();
+        } catch (error) {
+        }
+
+        let obbs = null;
+
+        try {
+            obbs = vehicle.getOBBs();
+        } catch (error2) {
+            SENSOR_OBB_CACHE[cacheKey] = {
+                tick: tick,
+                obb: null
+            };
+
+            return null;
+        }
+
+        if (obbs != null) {
+            try {
+                let iterator = obbs.iterator();
+
+                while (iterator.hasNext()) {
+                    let obb = iterator.next();
+
+                    if (isCollisionOBB(obb)) {
+                        result = obb;
+                        break;
+                    }
+                }
+            } catch (error3) {
+                try {
+                    for (let i = 0; i < obbs.length; i++) {
+                        let obb = obbs[i];
+
+                        if (isCollisionOBB(obb)) {
+                            result = obb;
+                            break;
+                        }
+                    }
+                } catch (error4) {
+                }
+            }
+        }
+
+        SENSOR_OBB_CACHE[cacheKey] = {
+            tick: tick,
+            obb: result
+        };
+
+        return result;
+    }
+
+
+    function getVehicleCacheKey(vehicle) {
+        try {
+            return vehicle.getStringUuid();
+        } catch (error) {
+        }
+
+        try {
+            return String(vehicle.getUuid());
+        } catch (error2) {
+        }
+
+        return String(vehicle.getId ? vehicle.getId() : vehicle);
+    }
+
+
+    function isCollisionOBB(obb) {
+        if (obb == null) return false;
+
+        try {
+            let partText = String(obb.part).toUpperCase();
+
+            return partText.indexOf("COLLISION") >= 0;
+        } catch (error) {
+        }
+
+        return false;
+    }
+
+
+    function getBestVehicleSensorBox(vehicle) {
+        // Sensor Core V2 uses this only as fallback.
+        // The normal path should be the Collision OBB from vehicle.getOBBs().
+        try {
+            let obbs = vehicle.getOBBs();
+            let iterator = obbs.iterator();
+
+            let minX = 1.0e30;
+            let minY = 1.0e30;
+            let minZ = 1.0e30;
+            let maxX = -1.0e30;
+            let maxY = -1.0e30;
+            let maxZ = -1.0e30;
+
+            let found = false;
+
+            while (iterator.hasNext()) {
+                let obb = iterator.next();
+                let vertices = obb.getVertices();
+
+                for (let i = 0; i < vertices.length; i++) {
+                    let v = vertices[i];
+
+                    let x = component(v, "x");
+                    let y = component(v, "y");
+                    let z = component(v, "z");
+
+                    minX = Math.min(minX, x);
+                    minY = Math.min(minY, y);
+                    minZ = Math.min(minZ, z);
+
+                    maxX = Math.max(maxX, x);
+                    maxY = Math.max(maxY, y);
+                    maxZ = Math.max(maxZ, z);
+
+                    found = true;
+                }
+            }
+
+            if (found) {
+                return AABB.of(minX, minY, minZ, maxX, maxY, maxZ);
+            }
+        } catch (error) {
+        }
+
+        try {
+            return $VehicleMotionUtils.INSTANCE.calculateCombinedAABBOptimized(vehicle);
+        } catch (error2) {
+        }
+
+        try {
+            return vehicle.getBoundingBox();
+        } catch (error3) {
+        }
+
+        return vehicle.boundingBox;
+    }
+
+
+    function getObbExtents(obb) {
+        try {
+            return obb.extents();
+        } catch (error) {
+        }
+
+        try {
+            return obb.extents;
+        } catch (error2) {
+        }
+
+        return null;
+    }
+
+
+    function getArrayLike(value, index) {
+        if (value == null) return null;
+
+        try {
+            return value[index];
+        } catch (error) {
+        }
+
+        try {
+            return value.get(index);
+        } catch (error2) {
+        }
+
+        return null;
+    }
+
+
+    function component(value, name) {
+        if (value == null) return 0.0;
+
+        try {
+            let possibleFunction = value[name];
+
+            if (typeof possibleFunction === "function") {
+                return Number(possibleFunction.call(value));
+            }
+        } catch (error) {
+        }
+
+        try {
+            return Number(value[name]);
+        } catch (error2) {
+        }
+
+        return 0.0;
+    }
+
+
+    function vec3FromAny(value) {
+        return new $Vec3(
+            component(value, "x"),
+            component(value, "y"),
+            component(value, "z")
+        );
+    }
+
+
+    function dotFlat(a, b) {
+        return a.x() * b.x() + a.z() * b.z();
+    }
+
+
+    function getAabbFlatLengthAlong(aabb, flatDirection) {
+        let xSize = aabb.maxX - aabb.minX;
+        let zSize = aabb.maxZ - aabb.minZ;
+
+        return Math.abs(flatDirection.x()) * xSize
+            + Math.abs(flatDirection.z()) * zSize;
+    }
+
+
+    function getRightFromFlatDirection(flatDirection) {
+        return new $Vec3(
+            -flatDirection.z(),
+            0.0,
+            flatDirection.x()
+        );
     }
 
 
@@ -597,45 +1277,65 @@
         if (!DEBUG_DRIVING) return;
         if (vehicle.tickCount % DEBUG_EVERY_TICKS != 0) return;
 
-        const from = new $Vec3(
+        for (let ray of probe.rays) {
+            drawParticleLine(
+                vehicle,
+                ray.from,
+                ray.to,
+                ray.blocked ? "minecraft:flame" : "minecraft:end_rod",
+                RAY_DEBUG_STEPS
+            );
+
+            if (ray.blocked) {
+                vehicle.level.runCommandSilent(
+                    `particle minecraft:flame ${ray.hitLocation.x()} ${ray.hitLocation.y()} ${ray.hitLocation.z()} 0 0 0 0 3 force`
+                );
+            } else {
+                vehicle.level.runCommandSilent(
+                    `particle minecraft:glow ${ray.to.x()} ${ray.to.y()} ${ray.to.z()} 0 0 0 0 1 force`
+                );
+            }
+        }
+
+        // Frame markers: center, ray start center, and final allowed-progress marker.
+        if (probe.frame != null) {
+            let center = probe.frame.center;
+            let start = probe.frame.rayStartCenter;
+
+            vehicle.level.runCommandSilent(
+                `particle minecraft:happy_villager ${center.x()} ${center.y()} ${center.z()} 0 0 0 0 1 force`
+            );
+
+            vehicle.level.runCommandSilent(
+                `particle minecraft:composter ${start.x()} ${start.y()} ${start.z()} 0 0 0 0 1 force`
+            );
+        }
+
+        let from = new $Vec3(
             vehicle.getX(),
             vehicle.getY() + 0.75,
             vehicle.getZ()
         );
 
-        const wantedTo = new $Vec3(
-            from.x() + probe.wanted.x(),
-            from.y() + probe.wanted.y(),
-            from.z() + probe.wanted.z()
-        );
-
-        const allowedTo = new $Vec3(
+        let allowedTo = new $Vec3(
             from.x() + probe.allowed.x(),
             from.y() + probe.allowed.y(),
             from.z() + probe.allowed.z()
         );
 
-        drawParticleLine(vehicle, from, wantedTo, "minecraft:end_rod", 8);
-
-        if (probe.blocked) {
-            vehicle.level.runCommandSilent(
-                `particle minecraft:flame ${allowedTo.x()} ${allowedTo.y()} ${allowedTo.z()} 0 0 0 0 2 force`
-            );
-        } else {
-            vehicle.level.runCommandSilent(
-                `particle minecraft:glow ${allowedTo.x()} ${allowedTo.y()} ${allowedTo.z()} 0 0 0 0 1 force`
-            );
-        }
+        vehicle.level.runCommandSilent(
+            `particle ${probe.blocked ? "minecraft:flame" : "minecraft:glow"} ${allowedTo.x()} ${allowedTo.y()} ${allowedTo.z()} 0 0 0 0 2 force`
+        );
     }
 
 
     function drawParticleLine(vehicle, from, to, particle, steps) {
         for (let i = 0; i <= steps; i++) {
-            const t = i / steps;
+            let t = i / steps;
 
-            const x = from.x() + (to.x() - from.x()) * t;
-            const y = from.y() + (to.y() - from.y()) * t;
-            const z = from.z() + (to.z() - from.z()) * t;
+            let x = from.x() + (to.x() - from.x()) * t;
+            let y = from.y() + (to.y() - from.y()) * t;
+            let z = from.z() + (to.z() - from.z()) * t;
 
             vehicle.level.runCommandSilent(
                 `particle ${particle} ${x} ${y} ${z} 0 0 0 0 1 force`
@@ -676,12 +1376,12 @@
 
 
     function getAwayPositionFromEntity(vehicle, entity) {
-        const vx = vehicle.getX();
-        const vy = vehicle.getY();
-        const vz = vehicle.getZ();
+        let vx = vehicle.getX();
+        let vy = vehicle.getY();
+        let vz = vehicle.getZ();
 
-        const ex = entity.getX();
-        const ez = entity.getZ();
+        let ex = entity.getX();
+        let ez = entity.getZ();
 
         return new $Vec3(
             vx + (vx - ex),
@@ -692,8 +1392,8 @@
 
 
     function getVehicleHealthRatio(vehicle) {
-        const health = getVehicleHealth(vehicle);
-        const maxHealth = getVehicleMaxHealth(vehicle);
+        let health = getVehicleHealth(vehicle);
+        let maxHealth = getVehicleMaxHealth(vehicle);
 
         if (health < 0 || maxHealth <= 0) return 1.0;
 
@@ -747,69 +1447,98 @@
     // Direction helpers
     // -------------------------------------------------------------------------
 
+    function getVehicleFlatFront(vehicle) {
+        let collisionObb = getKubeCollisionOBB(vehicle);
+
+        if (collisionObb != null) {
+            try {
+                let axes = collisionObb.getAxes();
+                let front = normalizeFlatDirection(vec3FromAny(getArrayLike(axes, 2)));
+
+                if (horizontalLength(front) > 0.001) {
+                    return front;
+                }
+            } catch (error) {
+            }
+        }
+
+        try {
+            let view = normalizeFlatDirection(vehicle.getViewVector(1.0));
+
+            if (horizontalLength(view) > 0.001) {
+                return view;
+            }
+        } catch (error2) {
+        }
+
+        return getFlatForward(vehicle);
+    }
+
+
     function getFlatForward(vehicle) {
-        const f = vehicle.getForwardDirection();
+        try {
+            let f = vehicle.getForwardDirection();
 
-        const x = f.x();
-        const z = f.z();
+            let x = component(f, "x");
+            let z = component(f, "z");
 
-        const len = Math.sqrt(x * x + z * z);
-        if (len < 0.001) return new $Vec3(0, 0, 0);
+            let len = Math.sqrt(x * x + z * z);
+            if (len >= 0.001) {
+                return new $Vec3(x / len, 0.0, z / len);
+            }
+        } catch (error) {
+        }
 
-        return new $Vec3(x / len, 0, z / len);
+        return new $Vec3(0.0, 0.0, 1.0);
     }
 
 
     function getBackDirection(vehicle) {
-        const f = getFlatForward(vehicle);
+        let f = getVehicleFlatFront(vehicle);
 
         return new $Vec3(
             -f.x(),
-            0,
+            0.0,
             -f.z()
         );
     }
 
 
     function getFlatRight(vehicle) {
-        const f = getFlatForward(vehicle);
+        let f = getVehicleFlatFront(vehicle);
 
-        return new $Vec3(
-            -f.z(),
-            0,
-            f.x()
-        );
+        return getRightFromFlatDirection(f);
     }
 
 
     function getFrontDiagonalDirection(vehicle, side) {
-        const forward = getFlatForward(vehicle);
-        const right = getFlatRight(vehicle);
+        let forward = getVehicleFlatFront(vehicle);
+        let right = getRightFromFlatDirection(forward);
 
-        const x = forward.x() + right.x() * side;
-        const z = forward.z() + right.z() * side;
+        let x = forward.x() + right.x() * side;
+        let z = forward.z() + right.z() * side;
 
-        const len = Math.sqrt(x * x + z * z);
+        let len = Math.sqrt(x * x + z * z);
         if (len < 0.001) return forward;
 
-        return new $Vec3(x / len, 0, z / len);
+        return new $Vec3(x / len, 0.0, z / len);
     }
 
 
     function normalizeFlatDirection(direction) {
-        const x = direction.x();
-        const z = direction.z();
+        let x = component(direction, "x");
+        let z = component(direction, "z");
 
-        const len = Math.sqrt(x * x + z * z);
-        if (len < 0.001) return new $Vec3(0, 0, 0);
+        let len = Math.sqrt(x * x + z * z);
+        if (len < 0.001) return new $Vec3(0.0, 0.0, 0.0);
 
-        return new $Vec3(x / len, 0, z / len);
+        return new $Vec3(x / len, 0.0, z / len);
     }
 
 
     function getDiffToPosition(vehicle, pos) {
-        const toPos = vehicle.position().vectorTo(pos).normalize();
-        const vehicleVec = vehicle.getViewVector(1.0).normalize();
+        let toPos = vehicle.position().vectorTo(pos).normalize();
+        let vehicleVec = vehicle.getViewVector(1.0).normalize();
 
         return $Mth.wrapDegrees(
             -$VehicleVecUtils.getYRotFromVector(toPos)
@@ -865,7 +1594,7 @@
 
 
     function applyAvoidTurn(vehicle) {
-        const turnDirection = getAvoidTurnDirection(vehicle);
+        let turnDirection = getAvoidTurnDirection(vehicle);
 
         if (turnDirection > 0) {
             assistedRight(vehicle);
@@ -876,7 +1605,7 @@
 
 
     function getAvoidTurnDirection(vehicle) {
-        const data = vehicle.getPersistentData();
+        let data = vehicle.getPersistentData();
 
         let direction = data.getInt("sbw_ai_avoid_turn_direction");
 
@@ -890,15 +1619,15 @@
 
 
     function flipAvoidTurnDirection(vehicle) {
-        const data = vehicle.getPersistentData();
+        let data = vehicle.getPersistentData();
 
-        const direction = getAvoidTurnDirection(vehicle);
+        let direction = getAvoidTurnDirection(vehicle);
         data.putInt("sbw_ai_avoid_turn_direction", -direction);
     }
 
 
     function startReverseAlign(vehicle) {
-        const data = vehicle.getPersistentData();
+        let data = vehicle.getPersistentData();
 
         data.putInt("sbw_ai_reverse_align_ticks", REVERSE_ALIGN_MAX_TICKS);
 
@@ -927,7 +1656,7 @@
 
 
     function canStartReverseAlign(vehicle) {
-        const data = vehicle.getPersistentData();
+        let data = vehicle.getPersistentData();
 
         return data.getInt("sbw_ai_reverse_align_ticks") <= 0
             && data.getInt("sbw_ai_reverse_align_cooldown") <= 0;
@@ -935,14 +1664,14 @@
 
 
     function stopReverseAlign(vehicle) {
-        const data = vehicle.getPersistentData();
+        let data = vehicle.getPersistentData();
 
         data.putInt("sbw_ai_reverse_align_ticks", 0);
     }
 
 
     function assistedCreepForward(vehicle) {
-        const data = vehicle.getPersistentData();
+        let data = vehicle.getPersistentData();
 
         let creepTicks = data.getInt("sbw_ai_creep_forward_ticks");
 
@@ -955,7 +1684,7 @@
             return true;
         }
 
-        const cooldown = data.getInt("sbw_ai_creep_forward_cooldown");
+        let cooldown = data.getInt("sbw_ai_creep_forward_cooldown");
 
         if (cooldown > 0) {
             holdVehicle(vehicle);
@@ -977,7 +1706,7 @@
     // -------------------------------------------------------------------------
 
     function updateDrivingTimers(vehicle) {
-        const data = vehicle.getPersistentData();
+        let data = vehicle.getPersistentData();
 
         decrementTimer(data, "sbw_ai_reverse_align_cooldown");
         decrementTimer(data, "sbw_ai_creep_forward_cooldown");
@@ -985,7 +1714,7 @@
 
 
     function decrementTimer(data, key) {
-        const value = data.getInt(key);
+        let value = data.getInt(key);
 
         if (value > 0) {
             data.putInt(key, value - 1);
@@ -994,44 +1723,33 @@
 
 
     function updateFrontBlockedTicks(vehicle, frontBlocked) {
-        const data = vehicle.getPersistentData();
+        let data = vehicle.getPersistentData();
 
         if (!frontBlocked) {
             data.putInt("sbw_ai_front_blocked_ticks", 0);
             return 0;
         }
 
-        const ticks = data.getInt("sbw_ai_front_blocked_ticks") + 1;
+        let ticks = data.getInt("sbw_ai_front_blocked_ticks") + 1;
         data.putInt("sbw_ai_front_blocked_ticks", ticks);
 
         return ticks;
     }
 
-
-    function getHorizontalSpeed(vehicle) {
-        const movement = vehicle.getDeltaMovement();
-
-        const x = movement.x();
-        const z = movement.z();
-
-        return Math.sqrt(x * x + z * z);
-    }
-
-
     function updateStuckTicks(vehicle, wantedToMove) {
-        const data = vehicle.getPersistentData();
+        let data = vehicle.getPersistentData();
 
         if (!wantedToMove) {
             data.putInt("sbw_ai_stuck_ticks", 0);
             return 0;
         }
 
-        const speed = getHorizontalSpeed(vehicle);
+        let speed = getHorizontalSpeed(vehicle);
 
-        const minimumMovingSpeed = 0.06;
+        let minimumMovingSpeed = 0.06;
 
         if (speed < minimumMovingSpeed) {
-            const stuckTicks = data.getInt("sbw_ai_stuck_ticks") + 1;
+            let stuckTicks = data.getInt("sbw_ai_stuck_ticks") + 1;
             data.putInt("sbw_ai_stuck_ticks", stuckTicks);
             return stuckTicks;
         }
@@ -1042,7 +1760,7 @@
 
 
     function updateRecoveryCooldown(vehicle) {
-        const data = vehicle.getPersistentData();
+        let data = vehicle.getPersistentData();
 
         let cooldown = data.getInt("sbw_ai_collision_recovery");
 
@@ -1058,7 +1776,7 @@
 
 
     function startCollisionRecovery(vehicle) {
-        const data = vehicle.getPersistentData();
+        let data = vehicle.getPersistentData();
 
         data.putInt("sbw_ai_collision_recovery", 10);
     }
@@ -1084,8 +1802,8 @@
 
 
     function horizontalLength(vec) {
-        const x = vec.x();
-        const z = vec.z();
+        let x = vec.x();
+        let z = vec.z();
 
         return Math.sqrt(x * x + z * z);
     }
@@ -1094,5 +1812,23 @@
     function clamp(value, min, max) {
         return Math.max(min, Math.min(max, value));
     }
+
+    function horizontalDistanceBetween(a, b) {
+        let x = b.x() - a.x();
+        let z = b.z() - a.z();
+
+        return Math.sqrt(x * x + z * z);
+    }
+
+
+    function getHorizontalSpeed(vehicle) {
+        let movement = vehicle.getDeltaMovement();
+
+        let x = movement.x();
+        let z = movement.z();
+
+        return Math.sqrt(x * x + z * z);
+    }
+
 
 })();

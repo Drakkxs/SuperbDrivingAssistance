@@ -10,7 +10,7 @@
     const REVERSE_ALIGN_MAX_TICKS = 64;
     const REVERSE_ALIGN_COOLDOWN_TICKS = 18;
 
-    const CREEP_FORWARD_TICKS = 3;
+    const CREEP_FORWARD_TICKS = 6;
     const CREEP_FORWARD_COOLDOWN_TICKS = 8;
 
     // Matches VehicleEffectUtils.lowHealthWarning:
@@ -22,20 +22,34 @@
     // If attacker is behind-ish, drive forward away.
     const PANIC_FORWARD_ANGLE = 70;
 
+    // vCollide probe tuning.
+    // This is not ray distance anymore. This is "try moving the actual OBB body this far."
+    const MOVE_PROBE_DISTANCE_MIN = 1.25;
+    const MOVE_PROBE_DISTANCE_MAX = 5.0;
+    const MOVE_PROBE_LENGTH_MULTIPLIER = 0.65;
+
+    // If Superb Warfare allows less than this much of the requested movement,
+    // treat the path as blocked.
+    const MOVE_BLOCKED_RATIO = 0.55;
+
+    // Used when choosing left vs right.
+    // Prevents tiny score differences from constantly flipping steering.
+    const AVOID_SCORE_MARGIN = 0.10;
+
+    const OBSTACLE_REVERSE_MIN_TICKS = 12;
+    const OBSTACLE_REVERSE_MAX_TICKS = 40;
+    const OBSTACLE_REVERSE_TICKS_PER_BLOCK = 5;
+
     const { $UUID } = require("@package/java/util");
-    const { $ClipContext$Block, $ClipContext$Fluid, $ClipContext } = require("@package/net/minecraft/world/level");
-    const { $OBB } = require("@package/com/atsuishio/superbwarfare/tools");
-    const { $BlockPos } = require("@package/net/minecraft/core");
-    const { $HitResult$Type } = require("@package/net/minecraft/world/phys");
     const { $Player } = require("@package/net/minecraft/world/entity/player");
     const { $PlayerInteractEvent$EntityInteract } = require("@package/net/neoforged/neoforge/event/entity/player");
     const { $EntityTickEvent$Pre } = require("@package/net/neoforged/neoforge/event/tick");
     const { $VehicleEntity } = require("@package/com/atsuishio/superbwarfare/entity/vehicle/base");
-    const { $VehicleVecUtils, $VehicleMiscUtils, $VehicleMotionUtils } = require("@package/com/atsuishio/superbwarfare/entity/vehicle/utils");
+    const { $VehicleVecUtils, $VehicleMotionUtils } = require("@package/com/atsuishio/superbwarfare/entity/vehicle/utils");
     const { $Monster } = require("@package/net/minecraft/world/entity/monster");
     const { $LivingEntity } = require("@package/net/minecraft/world/entity");
     const { $Mth } = require("@package/net/minecraft/util");
-    const { $Vec3, $AABB } = require("@package/net/minecraft/world/phys");
+    const { $Vec3 } = require("@package/net/minecraft/world/phys");
 
 
     NativeEvents.onEvent($PlayerInteractEvent$EntityInteract, (event) => {
@@ -67,77 +81,24 @@
 
     NativeEvents.onEvent($EntityTickEvent$Pre, (event) => {
 
-        // Quickly find a random driver
         const driver = event.getEntity();
-        // Driver is not a Living Entity
+
         if (!(driver instanceof $LivingEntity)) return;
-        // Cannot be players
         if (driver.isPlayer()) return;
-
-        // Tick Staggering
-        // Each Entity only checks once every 5 ticks
-        // if ((driver.tickCount + driver.getId()) % 5 != 0) return
-
-        // Not on the client
         if (driver.level.isClientSide()) return;
 
         const vehicle = driver.getVehicle();
 
-        // Driver is not in a vehicle
         if (vehicle == null) return;
-
-        // Vehicle is not a vehicle
         if (!(vehicle instanceof $VehicleEntity)) return;
-
-        // Only the first passenger should drive
         if (vehicle.getFirstPassenger() != driver) return;
 
-        // Vehicle is hostile
         vehicle.getPersistentData().putBoolean("sbw_ai_is_hostile", (driver instanceof $Monster));
 
-        // For now: do nothing except prove we reached the vehicle-driver state.
-        // Later this becomes steering / forward / reverse logic.
-        stopVehicle(vehicle, driver)
-        moveVehicle(vehicle, driver)
+        stopVehicle(vehicle, driver);
+        moveVehicle(vehicle, driver);
     });
 
-    function debugDriving(vehicle, message) {
-        if (!DEBUG_DRIVING) return;
-        if (vehicle.tickCount % DEBUG_EVERY_TICKS != 0) return;
-
-        // Actionbar instead of chat spam.
-        vehicle.level.runCommandSilent(
-            `title @a actionbar {"text":"[SDA] ${message}","color":"yellow"}`
-        );
-    }
-    function getRayDebug(vehicle) {
-        const distance = getVehicleRayDistance(vehicle);
-        const from = getVehicleFrontRayStart(vehicle);
-        const forward = vehicle.getForwardDirection();
-
-        const to = new $Vec3(
-            from.x() + forward.x() * distance,
-            from.y(),
-            from.z() + forward.z() * distance
-        );
-
-        const context = new $ClipContext(
-            from,
-            to,
-            $ClipContext$Block.COLLIDER,
-            $ClipContext$Fluid.NONE,
-            vehicle
-        );
-
-        const hit = vehicle.level.clip(context);
-
-        if (hit == null) return "hit=null";
-        if (hit.getType() == $HitResult$Type.MISS) return "hit=MISS";
-
-        const loc = hit.getLocation();
-
-        return `hit=${hit.getType()} ${loc.x().toFixed(1)},${loc.y().toFixed(1)},${loc.z().toFixed(1)}`;
-    }
 
     function moveVehicle(vehicle, driver) {
         const followRange = driver.getAttributeValue("minecraft:generic.follow_range");
@@ -148,11 +109,11 @@
             return;
         }
 
-        // Normal combat driving starts only after panic says "not my problem."
         const target = driver.getTarget ? driver.getTarget() : null;
         if (!(target instanceof $LivingEntity)) return;
 
         updateRecoveryCooldown(vehicle);
+        updateDrivingTimers(vehicle);
 
         const diff = getDiffToPosition(vehicle, target.position());
         const absDiff = Math.abs(diff);
@@ -164,12 +125,18 @@
         assistedDrive(vehicle, distance, followRange, diff, absDiff);
     }
 
+
+    /**
+     * Panic escape.
+     * @param {$VehicleEntity} vehicle 
+     * @param {$LivingEntity} driver 
+     * @param {Number} followRange
+     */
     function tryPanicEscape(vehicle, driver, followRange) {
         const healthRatio = getVehicleHealthRatio(vehicle);
         const warning = vehicleHasLowHealthWarning(vehicle);
         const attackerUuid = getVehicleLastAttackerUuid(vehicle);
 
-        // Debug this even when panic fails, because this is how we find the broken link.
         debugDriving(
             vehicle,
             `panicCheck hp=${healthRatio.toFixed(2)} smoke=${SMOKE_HEALTH_RATIO.toFixed(2)} warning=${warning} uuid=${attackerUuid}`
@@ -181,7 +148,9 @@
 
         const attacker = getLastAttackerEntity(vehicle);
 
-        if (!(attacker instanceof $LivingEntity)) {
+        // Last Attacker cannot equal a passanger of the vehicle.
+        // Last Attacker cannot be within the vehicles bounding.
+        if (!(attacker instanceof $LivingEntity) || vehicle.isPassengerOfSameVehicle(attacker) || attacker == vehicle) {
             debugDriving(
                 vehicle,
                 `panicFail uuidFoundButEntityMissing uuid=${attackerUuid}`
@@ -192,8 +161,6 @@
 
         const panicDistance = vehicle.distanceToEntity(attacker);
 
-        // If we escaped the attacker's relevant range, stop the vehicle.
-        // Do not instantly return to normal chase while smoking.
         if (panicDistance > followRange) {
             debugDriving(
                 vehicle,
@@ -209,87 +176,39 @@
     }
 
 
-    function shouldPanic(vehicle) {
-        const healthRatio = getVehicleHealthRatio(vehicle);
-        const lastAttackerUuid = getVehicleLastAttackerUuid(vehicle);
-
-        return vehicleHasLowHealthWarning(vehicle)
-            && healthRatio <= SMOKE_HEALTH_RATIO
-            && lastAttackerUuid != "";
-    }
-
-    function vehicleHasLowHealthWarning(vehicle) {
-        try {
-            return vehicle.data().compute().getHasLowHealthWarning();
-        } catch (error) {
-        }
-
-        return true;
-    }
-
-    function applyReverseAwayFromTarget(vehicle, diff) {
-        vehicle.setForwardInputDown(false);
-        vehicle.setBackInputDown(true);
-
-        // This is escape steering, not chase steering.
-        // If the vehicle turns the wrong way in-game, swap assistedLeft/assistedRight here.
-        if (diff < -12) {
-            assistedLeft(vehicle);
-        } else if (diff > 12) {
-            assistedRight(vehicle);
-        } else {
-            vehicle.setLeftInputDown(false);
-            vehicle.setRightInputDown(false);
-        }
-    }
-
     function assistedPanicDrive(vehicle, attacker, distance, followRange) {
-        const data = vehicle.getPersistentData();
-
         updateDrivingTimers(vehicle);
 
         const healthRatio = getVehicleHealthRatio(vehicle);
         const diffToAttacker = getDiffToPosition(vehicle, attacker.position());
         const absDiffToAttacker = Math.abs(diffToAttacker);
 
-        const frontBlocked = isFrontRayBlocked(vehicle);
         const speed = getHorizontalSpeed(vehicle);
-
-        debugDriving(
-            vehicle,
-            `PANIC smokeAt=${SMOKE_HEALTH_RATIO.toFixed(2)} hp=${healthRatio.toFixed(2)} warning=${vehicleHasLowHealthWarning(vehicle)} dist=${distance.toFixed(1)}/${followRange.toFixed(1)} attacker=${attacker.getName().getString()} diff=${diffToAttacker.toFixed(1)} front=${frontBlocked} speed=${speed.toFixed(2)}`
-        );
-
-        // Do not panic-drive straight into an obstacle.
-        const frontBlockedTicks = updateFrontBlockedTicks(vehicle, frontBlocked);
-
-        if (frontBlocked) {
-            const leftBlocked = isFrontLeftRayBlocked(vehicle);
-            const rightBlocked = isFrontRightRayBlocked(vehicle);
-
-            chooseAvoidTurnDirection(vehicle, leftBlocked, rightBlocked);
-
-            vehicle.setForwardInputDown(false);
-            vehicle.setBackInputDown(false);
-            applyAvoidTurn(vehicle);
-
-            if (frontBlockedTicks >= 10) {
-                data.putInt("sbw_ai_front_blocked_ticks", 0);
-
-                const reverseTicks = Math.ceil(getVehicleRayDistance(vehicle) * 2);
-                data.putInt("sbw_ai_reverse_ticks", reverseTicks);
-
-                vehicle.setForwardInputDown(false);
-                vehicle.setBackInputDown(true);
-                applyAvoidTurn(vehicle);
-            }
-
-            updateStuckTicks(vehicle, false);
-            return false;
-        }
 
         // If attacker is in front-ish, reverse away.
         if (absDiffToAttacker < 100) {
+            const backProbe = getBackMoveProbe(vehicle);
+
+            debugDriving(
+                vehicle,
+                `PANIC reverse hp=${healthRatio.toFixed(2)} dist=${distance.toFixed(1)}/${followRange.toFixed(1)} attacker=${attacker.getName().getString()} diff=${diffToAttacker.toFixed(1)} backFit=${backProbe.ratio.toFixed(2)} speed=${speed.toFixed(2)}`
+            );
+
+            if (backProbe.blocked) {
+                // Backing up would collide. Do not ram backward forever.
+                // Pick the better forward diagonal and rotate.
+                const leftProbe = getFrontLeftMoveProbe(vehicle);
+                const rightProbe = getFrontRightMoveProbe(vehicle);
+
+                chooseAvoidTurnDirectionFromProbes(vehicle, leftProbe, rightProbe);
+
+                holdVehicle(vehicle);
+                applyAvoidTurn(vehicle);
+
+                updateStuckTicks(vehicle, false);
+                return false;
+            }
+
             vehicle.setForwardInputDown(false);
             vehicle.setBackInputDown(true);
 
@@ -299,12 +218,24 @@
             return true;
         }
 
-        // If attacker is behind-ish, drive forward away.
+        // Attacker is behind-ish, so drive forward away.
         const awayPos = getAwayPositionFromEntity(vehicle, attacker);
         const diffAway = getDiffToPosition(vehicle, awayPos);
         const absDiffAway = Math.abs(diffAway);
 
         steerTowardDiff(vehicle, diffAway, absDiffAway);
+
+        const frontProbe = getFrontMoveProbe(vehicle);
+        const frontBlockedTicks = updateFrontBlockedTicks(vehicle, frontProbe.blocked);
+
+        debugDriving(
+            vehicle,
+            `PANIC forward hp=${healthRatio.toFixed(2)} dist=${distance.toFixed(1)}/${followRange.toFixed(1)} attacker=${attacker.getName().getString()} awayDiff=${diffAway.toFixed(1)} frontFit=${frontProbe.ratio.toFixed(2)} speed=${speed.toFixed(2)}`
+        );
+
+        if (frontProbe.blocked) {
+            return handleBlockedForward(vehicle, frontBlockedTicks);
+        }
 
         if (absDiffAway < PANIC_FORWARD_ANGLE) {
             vehicle.setForwardInputDown(true);
@@ -313,15 +244,7 @@
             const stuckTicks = updateStuckTicks(vehicle, true);
 
             if (stuckTicks >= 10) {
-                data.putInt("sbw_ai_stuck_ticks", 0);
-
-                const reverseTicks = Math.ceil(getVehicleRayDistance(vehicle) * 2);
-                data.putInt("sbw_ai_reverse_ticks", reverseTicks);
-
-                vehicle.setForwardInputDown(false);
-                vehicle.setBackInputDown(true);
-                applyAvoidTurn(vehicle);
-
+                startObstacleReverse(vehicle);
                 return false;
             }
 
@@ -333,195 +256,27 @@
         return true;
     }
 
-    function getAwayPositionFromEntity(vehicle, entity) {
-        const vx = vehicle.getX();
-        const vy = vehicle.getY();
-        const vz = vehicle.getZ();
-
-        const ex = entity.getX();
-        const ez = entity.getZ();
-
-        return new $Vec3(
-            vx + (vx - ex),
-            vy,
-            vz + (vz - ez)
-        );
-    }
-
-    function getVehicleHealthRatio(vehicle) {
-        const health = getVehicleHealth(vehicle);
-        const maxHealth = getVehicleMaxHealth(vehicle);
-
-        if (health < 0 || maxHealth <= 0) return 1.0;
-
-        return health / maxHealth;
-    }
-
-    function getVehicleHealth(vehicle) {
-        try {
-            return vehicle.getEntityData().get($VehicleEntity.HEALTH);
-        } catch (error) {
-        }
-
-        try {
-            return vehicle.health;
-        } catch (error) {
-        }
-
-        try {
-            return vehicle.getHealth();
-        } catch (error) {
-        }
-
-        return -1;
-    }
-
-    function getVehicleMaxHealth(vehicle) {
-        try {
-            return vehicle.getMaxHealth();
-        } catch (error) {
-            return -1;
-        }
-    }
-
-    /** @param {$VehicleEntity} vehicle */
-    function getVehicleLastAttackerUuid(vehicle) {
-        const uuid = String(vehicle.getEntityData().get($VehicleEntity.LAST_ATTACKER_UUID));
-
-        if (uuid && uuid != "" && uuid != "undefined") {
-            return String(uuid);
-        }
-
-        return "";
-    }
-
-    /** @param {$VehicleEntity} vehicle */
-    function getLastAttackerEntity(vehicle) {
-        const uuidString = getVehicleLastAttackerUuid(vehicle);
-
-        if (!uuidString) return null;
-
-        try {
-            return vehicle.level.getEntityByUUID(uuidString);
-        } catch (error) {
-            return null;
-        }
-    }
-
-    function getFlatRight(vehicle) {
-        const f = getFlatForward(vehicle);
-
-        return new $Vec3(
-            -f.z(),
-            0,
-            f.x()
-        );
-    }
-    function getFrontDiagonalDirection(vehicle, side) {
-        const forward = getFlatForward(vehicle);
-        const right = getFlatRight(vehicle);
-
-        // side = 1 means right
-        // side = -1 means left
-        const x = forward.x() + right.x() * side;
-        const z = forward.z() + right.z() * side;
-
-        const len = Math.sqrt(x * x + z * z);
-        if (len < 0.001) return forward;
-
-        return new $Vec3(x / len, 0, z / len);
-    }
-
-    function getFlatForward(vehicle) {
-        const f = vehicle.getForwardDirection();
-
-        const x = f.x();
-        const z = f.z();
-
-        const len = Math.sqrt(x * x + z * z);
-        if (len < 0.001) return new $Vec3(0, 0, 0);
-
-        return new $Vec3(x / len, 0, z / len);
-    }
-
-    /**
-     * Draws the outline of an AABB with particles.
-     *
-     * @param {$VehicleEntity} vehicle
-     * @param {$AABB} aabb
-     */
-    function drawBox(vehicle, aabb) {
-        const center = aabb.getCenter();
-
-        vehicle.level.runCommandSilent(`particle minecraft:glow ${center.x()} ${center.y()} ${center.z()} 0 0 0 0 1 force`);
-        vehicle.level.runCommandSilent(`particle minecraft:glow ${aabb.maxX} ${aabb.maxY} ${aabb.maxZ} 0 0 0 0 1 force`);
-        vehicle.level.runCommandSilent(`particle minecraft:glow ${aabb.minX} ${aabb.minY} ${aabb.minZ} 0 0 0 0 1 force`);
-    }
-
-    function steerTowardDiff(vehicle, diff, absDiff) {
-        if (absDiff > 12) {
-            if (diff < -12) assistedLeft(vehicle);
-            if (diff > 12) assistedRight(vehicle);
-        } else {
-            vehicle.setLeftInputDown(false);
-            vehicle.setRightInputDown(false);
-        }
-    }
-
-    function startReverseAlign(vehicle) {
-        const data = vehicle.getPersistentData();
-
-        data.putInt("sbw_ai_reverse_align_ticks", REVERSE_ALIGN_MAX_TICKS);
-
-        // This prevents REVERSE_ALIGN from immediately restarting forever.
-        // We include the active time + extra cooldown.
-        data.putInt(
-            "sbw_ai_reverse_align_cooldown",
-            REVERSE_ALIGN_MAX_TICKS + REVERSE_ALIGN_COOLDOWN_TICKS
-        );
-    }
-
-    function applyReverseAlign(vehicle, diff) {
-        vehicle.setForwardInputDown(false);
-        vehicle.setBackInputDown(true);
-
-        // For reverse driving, steering may need to be opposite.
-        // If it turns the wrong way in-game, swap these two.
-        if (diff < -12) {
-            assistedRight(vehicle);
-        } else if (diff > 12) {
-            assistedLeft(vehicle);
-        } else {
-            vehicle.setLeftInputDown(false);
-            vehicle.setRightInputDown(false);
-        }
-    }
 
     function assistedDrive(vehicle, distance, followRange, diff, absDiff) {
         const data = vehicle.getPersistentData();
 
-        updateDrivingTimers(vehicle);
-
         let reverseTicks = data.getInt("sbw_ai_reverse_ticks");
         let reverseAlignTicks = data.getInt("sbw_ai_reverse_align_ticks");
 
-        const frontBlocked = isFrontRayBlocked(vehicle);
-        const collision = isVehicleCollidingThisTick(vehicle);
+        const frontProbe = getFrontMoveProbe(vehicle);
         const speed = getHorizontalSpeed(vehicle);
-
         const driveState = getDriveAlignmentState(absDiff);
 
         debugDriving(
             vehicle,
-            `state=${driveState} diff=${diff.toFixed(1)} front=${frontBlocked} speed=${speed.toFixed(2)} reverse=${reverseTicks} align=${reverseAlignTicks} alignCd=${data.getInt("sbw_ai_reverse_align_cooldown")} creep=${data.getInt("sbw_ai_creep_forward_ticks")} stuck=${data.getInt("sbw_ai_stuck_ticks")}`
+            `state=${driveState} diff=${diff.toFixed(1)} frontFit=${frontProbe.ratio.toFixed(2)} speed=${speed.toFixed(2)} reverse=${reverseTicks} align=${reverseAlignTicks} alignCd=${data.getInt("sbw_ai_reverse_align_cooldown")} creep=${data.getInt("sbw_ai_creep_forward_ticks")} stuck=${data.getInt("sbw_ai_stuck_ticks")}`
         );
 
         // Active reverse-align maneuver.
-        // This is now limited. It cannot run forever.
+        // This is limited and cannot run forever.
         if (reverseAlignTicks > 0) {
             data.putInt("sbw_ai_reverse_align_ticks", reverseAlignTicks - 1);
 
-            // If we have swung around enough, stop reversing early.
             if (absDiff < 45) {
                 stopReverseAlign(vehicle);
                 holdVehicle(vehicle);
@@ -529,8 +284,16 @@
                 return false;
             }
 
-            // If we reversed too far away, stop reversing early.
             if (distance > followRange * 0.6) {
+                stopReverseAlign(vehicle);
+                holdVehicle(vehicle);
+                updateStuckTicks(vehicle, false);
+                return false;
+            }
+
+            const backProbe = getBackMoveProbe(vehicle);
+
+            if (backProbe.blocked) {
                 stopReverseAlign(vehicle);
                 holdVehicle(vehicle);
                 updateStuckTicks(vehicle, false);
@@ -554,6 +317,16 @@
         if (reverseTicks > 0) {
             data.putInt("sbw_ai_reverse_ticks", reverseTicks - 1);
 
+            const backProbe = getBackMoveProbe(vehicle);
+
+            if (backProbe.blocked) {
+                data.putInt("sbw_ai_reverse_ticks", 0);
+                holdVehicle(vehicle);
+                applyAvoidTurn(vehicle);
+                updateStuckTicks(vehicle, false);
+                return false;
+            }
+
             vehicle.setForwardInputDown(false);
             vehicle.setBackInputDown(true);
 
@@ -563,37 +336,10 @@
             return true;
         }
 
-        const frontBlockedTicks = updateFrontBlockedTicks(vehicle, frontBlocked);
+        const frontBlockedTicks = updateFrontBlockedTicks(vehicle, frontProbe.blocked);
 
-        if (frontBlocked) {
-            const leftBlocked = isFrontLeftRayBlocked(vehicle);
-            const rightBlocked = isFrontRightRayBlocked(vehicle);
-
-            const turnDirection = chooseAvoidTurnDirection(vehicle, leftBlocked, rightBlocked);
-
-            vehicle.setForwardInputDown(false);
-            vehicle.setBackInputDown(false);
-
-            if (turnDirection > 0) {
-                assistedRight(vehicle);
-            } else {
-                assistedLeft(vehicle);
-            }
-
-            if (frontBlockedTicks >= 10) {
-                data.putInt("sbw_ai_front_blocked_ticks", 0);
-
-                const reverseTicks = Math.ceil(getVehicleRayDistance(vehicle) * 2);
-                data.putInt("sbw_ai_reverse_ticks", reverseTicks);
-
-                vehicle.setForwardInputDown(false);
-                vehicle.setBackInputDown(true);
-
-                applyAvoidTurn(vehicle);
-            }
-
-            updateStuckTicks(vehicle, false);
-            return false;
+        if (frontProbe.blocked) {
+            return handleBlockedForward(vehicle, frontBlockedTicks);
         }
 
         if (driveState == "REVERSE_ALIGN") {
@@ -605,17 +351,12 @@
                 return true;
             }
 
-            // Cooldown active.
-            // Do not restart reverse immediately.
             holdVehicle(vehicle);
             updateStuckTicks(vehicle, false);
             return false;
         }
 
         if (driveState == "TURN_ONLY") {
-            // Instead of infinite reverse, use a tiny forward pulse.
-            // This gives wheeled vehicles some movement so steering can matter,
-            // without full-throttle circling forever.
             assistedCreepForward(vehicle);
 
             updateStuckTicks(vehicle, true);
@@ -629,44 +370,510 @@
         const stuckTicks = updateStuckTicks(vehicle, true);
 
         if (stuckTicks >= 10) {
-            data.putInt("sbw_ai_stuck_ticks", 0);
-
-            const reverseTicks = Math.ceil(getVehicleRayDistance(vehicle) * 2);
-            data.putInt("sbw_ai_reverse_ticks", reverseTicks);
-
-            vehicle.setForwardInputDown(false);
-            vehicle.setBackInputDown(true);
-
+            startObstacleReverse(vehicle);
             return false;
         }
 
         return true;
     }
 
+
+    function handleBlockedForward(vehicle, frontBlockedTicks) {
+        const leftProbe = getFrontLeftMoveProbe(vehicle);
+        const rightProbe = getFrontRightMoveProbe(vehicle);
+
+        const turnDirection = chooseAvoidTurnDirectionFromProbes(vehicle, leftProbe, rightProbe);
+
+        vehicle.setForwardInputDown(false);
+        vehicle.setBackInputDown(false);
+
+        if (turnDirection > 0) {
+            assistedRight(vehicle);
+        } else {
+            assistedLeft(vehicle);
+        }
+
+        if (frontBlockedTicks >= 10) {
+            vehicle.getPersistentData().putInt("sbw_ai_front_blocked_ticks", 0);
+
+            startObstacleReverse(vehicle);
+
+            vehicle.setForwardInputDown(false);
+            vehicle.setBackInputDown(true);
+
+            applyAvoidTurn(vehicle);
+        }
+
+        updateStuckTicks(vehicle, false);
+        return false;
+    }
+
+
+    function startObstacleReverse(vehicle) {
+        const data = vehicle.getPersistentData();
+
+        data.putInt("sbw_ai_stuck_ticks", 0);
+        data.putInt("sbw_ai_reverse_ticks", getObstacleReverseTicks(vehicle));
+
+        vehicle.setForwardInputDown(false);
+        vehicle.setBackInputDown(true);
+    }
+
+
+    function getObstacleReverseTicks(vehicle) {
+        const ticks = Math.ceil(getVehicleProbeDistance(vehicle) * OBSTACLE_REVERSE_TICKS_PER_BLOCK);
+
+        return clamp(
+            ticks,
+            OBSTACLE_REVERSE_MIN_TICKS,
+            OBSTACLE_REVERSE_MAX_TICKS
+        );
+    }
+
+
     function getDriveAlignmentState(absDiff) {
         if (absDiff < 35) return "FORWARD";
 
-        // Target is far enough off-angle that a wheeled vehicle should not just
-        // full-throttle circle. Back up while steering to swing the front around.
         if (absDiff > 90) return "REVERSE_ALIGN";
 
         return "TURN_ONLY";
     }
 
-    function invertCurrentSteering(vehicle) {
-        const left = vehicle.leftInputDown();
-        const right = vehicle.rightInputDown();
 
-        vehicle.setLeftInputDown(right);
-        vehicle.setRightInputDown(left);
+    // -------------------------------------------------------------------------
+    // vCollide movement probes
+    // -------------------------------------------------------------------------
+
+    function getFrontMoveProbe(vehicle) {
+        return getMovementProbe(
+            vehicle,
+            getFlatForward(vehicle),
+            getVehicleProbeDistance(vehicle),
+            "front"
+        );
     }
 
-    function flipAvoidTurnDirection(vehicle) {
+
+    function getBackMoveProbe(vehicle) {
+        return getMovementProbe(
+            vehicle,
+            getBackDirection(vehicle),
+            getVehicleProbeDistance(vehicle),
+            "back"
+        );
+    }
+
+
+    function getFrontLeftMoveProbe(vehicle) {
+        return getMovementProbe(
+            vehicle,
+            getFrontDiagonalDirection(vehicle, -1),
+            getVehicleProbeDistance(vehicle),
+            "frontLeft"
+        );
+    }
+
+
+    function getFrontRightMoveProbe(vehicle) {
+        return getMovementProbe(
+            vehicle,
+            getFrontDiagonalDirection(vehicle, 1),
+            getVehicleProbeDistance(vehicle),
+            "frontRight"
+        );
+    }
+
+    /**
+     * @param {$VehicleEntity} vehicle
+     * @param {$Vec3} direction
+     * @param {number} distance
+     * @param {string} label
+     */
+    function getMovementProbe(vehicle, direction, distance, label) {
+        const flat = normalizeFlatDirection(direction);
+
+        const wanted = new $Vec3(
+            flat.x() * distance,
+            0.0,
+            flat.z() * distance
+        );
+
+        let allowed = wanted;
+
+        try {
+            // This is the important part.
+            // vCollide asks Superb Warfare's own OBB/world collision solver
+            // how much of this movement would actually be allowed.
+            allowed = vehicle.vCollide(wanted);
+        } catch (error) {
+            allowed = wanted;
+        }
+
+        const wantedDistance = horizontalLength(wanted);
+        const allowedDistance = horizontalLength(allowed);
+
+        let ratio = 1.0;
+        if (wantedDistance > 0.001) {
+            ratio = allowedDistance / wantedDistance;
+        }
+
+        ratio = clamp(ratio, 0.0, 1.0);
+
+        const probe = {
+            label: label,
+            wanted: wanted,
+            allowed: allowed,
+            wantedDistance: wantedDistance,
+            allowedDistance: allowedDistance,
+            ratio: ratio,
+            blocked: ratio < MOVE_BLOCKED_RATIO
+        };
+
+        drawMovementProbe(vehicle, probe);
+
+        return probe;
+    }
+
+
+    function chooseAvoidTurnDirectionFromProbes(vehicle, leftProbe, rightProbe) {
         const data = vehicle.getPersistentData();
 
-        const direction = getAvoidTurnDirection(vehicle);
-        data.putInt("sbw_ai_avoid_turn_direction", -direction);
+        let current = getAvoidTurnDirection(vehicle);
+
+        const leftScore = leftProbe.ratio;
+        const rightScore = rightProbe.ratio;
+
+        if (rightScore > leftScore + AVOID_SCORE_MARGIN) {
+            current = 1;
+        } else if (leftScore > rightScore + AVOID_SCORE_MARGIN) {
+            current = -1;
+        } else if (!rightProbe.blocked && leftProbe.blocked) {
+            current = 1;
+        } else if (!leftProbe.blocked && rightProbe.blocked) {
+            current = -1;
+        }
+
+        data.putInt("sbw_ai_avoid_turn_direction", current);
+        return current;
     }
+
+
+    function getVehicleProbeDistance(vehicle) {
+        let vehicleLength = 2.0;
+
+        try {
+            const aabb = $VehicleMotionUtils.INSTANCE.calculateCombinedAABBOptimized(vehicle);
+
+            const xSize = aabb.maxX - aabb.minX;
+            const zSize = aabb.maxZ - aabb.minZ;
+
+            vehicleLength = Math.max(xSize, zSize);
+        } catch (error) {
+            try {
+                vehicleLength = Math.max(vehicle.bbWidth, vehicle.bbHeight);
+            } catch (error2) {
+                vehicleLength = 2.0;
+            }
+        }
+
+        const speed = getHorizontalSpeed(vehicle);
+
+        // Faster vehicles look a little farther ahead.
+        const distance = vehicleLength * MOVE_PROBE_LENGTH_MULTIPLIER + speed * 8.0;
+
+        // PostEdit: Faster Vehicles will look as far ahead as neccessary.
+        // Original:
+        // return clamp(
+        //     distance,
+        //     MOVE_PROBE_DISTANCE_MIN,
+        //     MOVE_PROBE_DISTANCE_MAX
+        // );
+        // Changed:
+        return distance;
+    }
+
+
+    function drawMovementProbe(vehicle, probe) {
+        if (!DEBUG_DRIVING) return;
+        if (vehicle.tickCount % DEBUG_EVERY_TICKS != 0) return;
+
+        const from = new $Vec3(
+            vehicle.getX(),
+            vehicle.getY() + 0.75,
+            vehicle.getZ()
+        );
+
+        const wantedTo = new $Vec3(
+            from.x() + probe.wanted.x(),
+            from.y() + probe.wanted.y(),
+            from.z() + probe.wanted.z()
+        );
+
+        const allowedTo = new $Vec3(
+            from.x() + probe.allowed.x(),
+            from.y() + probe.allowed.y(),
+            from.z() + probe.allowed.z()
+        );
+
+        drawParticleLine(vehicle, from, wantedTo, "minecraft:end_rod", 8);
+
+        if (probe.blocked) {
+            vehicle.level.runCommandSilent(
+                `particle minecraft:flame ${allowedTo.x()} ${allowedTo.y()} ${allowedTo.z()} 0 0 0 0 2 force`
+            );
+        } else {
+            vehicle.level.runCommandSilent(
+                `particle minecraft:glow ${allowedTo.x()} ${allowedTo.y()} ${allowedTo.z()} 0 0 0 0 1 force`
+            );
+        }
+    }
+
+
+    function drawParticleLine(vehicle, from, to, particle, steps) {
+        for (let i = 0; i <= steps; i++) {
+            const t = i / steps;
+
+            const x = from.x() + (to.x() - from.x()) * t;
+            const y = from.y() + (to.y() - from.y()) * t;
+            const z = from.z() + (to.z() - from.z()) * t;
+
+            vehicle.level.runCommandSilent(
+                `particle ${particle} ${x} ${y} ${z} 0 0 0 0 1 force`
+            );
+        }
+    }
+
+
+    // -------------------------------------------------------------------------
+    // Panic helpers
+    // -------------------------------------------------------------------------
+
+    function vehicleHasLowHealthWarning(vehicle) {
+        try {
+            return vehicle.data().compute().getHasLowHealthWarning();
+        } catch (error) {
+        }
+
+        return true;
+    }
+
+
+    function applyReverseAwayFromTarget(vehicle, diff) {
+        vehicle.setForwardInputDown(false);
+        vehicle.setBackInputDown(true);
+
+        // Escape steering, not chase steering.
+        // If the vehicle turns the wrong way in-game, swap assistedLeft/assistedRight here.
+        if (diff < -12) {
+            assistedLeft(vehicle);
+        } else if (diff > 12) {
+            assistedRight(vehicle);
+        } else {
+            vehicle.setLeftInputDown(false);
+            vehicle.setRightInputDown(false);
+        }
+    }
+
+
+    function getAwayPositionFromEntity(vehicle, entity) {
+        const vx = vehicle.getX();
+        const vy = vehicle.getY();
+        const vz = vehicle.getZ();
+
+        const ex = entity.getX();
+        const ez = entity.getZ();
+
+        return new $Vec3(
+            vx + (vx - ex),
+            vy,
+            vz + (vz - ez)
+        );
+    }
+
+
+    function getVehicleHealthRatio(vehicle) {
+        const health = getVehicleHealth(vehicle);
+        const maxHealth = getVehicleMaxHealth(vehicle);
+
+        if (health < 0 || maxHealth <= 0) return 1.0;
+
+        return health / maxHealth;
+    }
+
+
+    function getVehicleHealth(vehicle) {
+        try {
+            return vehicle.getEntityData().get($VehicleEntity.HEALTH);
+        } catch (error) {
+        }
+
+        try {
+            return vehicle.health;
+        } catch (error) {
+        }
+
+        try {
+            return vehicle.getHealth();
+        } catch (error) {
+        }
+
+        return -1;
+    }
+
+
+    function getVehicleMaxHealth(vehicle) {
+        try {
+            return vehicle.getMaxHealth();
+        } catch (error) {
+            return -1;
+        }
+    }
+
+
+    /** @param {$VehicleEntity} vehicle */
+    function getVehicleLastAttackerUuid(vehicle) {
+
+        return vehicle.getLastAttackerUUID() || "";
+    }
+
+
+    /** @param {$VehicleEntity} vehicle */
+    function getLastAttackerEntity(vehicle) {
+        return vehicle.getLastAttacker();
+    }
+
+
+    // -------------------------------------------------------------------------
+    // Direction helpers
+    // -------------------------------------------------------------------------
+
+    function getFlatForward(vehicle) {
+        const f = vehicle.getForwardDirection();
+
+        const x = f.x();
+        const z = f.z();
+
+        const len = Math.sqrt(x * x + z * z);
+        if (len < 0.001) return new $Vec3(0, 0, 0);
+
+        return new $Vec3(x / len, 0, z / len);
+    }
+
+
+    function getBackDirection(vehicle) {
+        const f = getFlatForward(vehicle);
+
+        return new $Vec3(
+            -f.x(),
+            0,
+            -f.z()
+        );
+    }
+
+
+    function getFlatRight(vehicle) {
+        const f = getFlatForward(vehicle);
+
+        return new $Vec3(
+            -f.z(),
+            0,
+            f.x()
+        );
+    }
+
+
+    function getFrontDiagonalDirection(vehicle, side) {
+        const forward = getFlatForward(vehicle);
+        const right = getFlatRight(vehicle);
+
+        const x = forward.x() + right.x() * side;
+        const z = forward.z() + right.z() * side;
+
+        const len = Math.sqrt(x * x + z * z);
+        if (len < 0.001) return forward;
+
+        return new $Vec3(x / len, 0, z / len);
+    }
+
+
+    function normalizeFlatDirection(direction) {
+        const x = direction.x();
+        const z = direction.z();
+
+        const len = Math.sqrt(x * x + z * z);
+        if (len < 0.001) return new $Vec3(0, 0, 0);
+
+        return new $Vec3(x / len, 0, z / len);
+    }
+
+
+    function getDiffToPosition(vehicle, pos) {
+        const toPos = vehicle.position().vectorTo(pos).normalize();
+        const vehicleVec = vehicle.getViewVector(1.0).normalize();
+
+        return $Mth.wrapDegrees(
+            -$VehicleVecUtils.getYRotFromVector(toPos)
+            + $VehicleVecUtils.getYRotFromVector(vehicleVec)
+        );
+    }
+
+
+    // -------------------------------------------------------------------------
+    // Input helpers
+    // -------------------------------------------------------------------------
+
+    function steerTowardDiff(vehicle, diff, absDiff) {
+        if (absDiff > 12) {
+            if (diff < -12) assistedLeft(vehicle);
+            if (diff > 12) assistedRight(vehicle);
+        } else {
+            vehicle.setLeftInputDown(false);
+            vehicle.setRightInputDown(false);
+        }
+    }
+
+
+    function assistedRight(vehicle) {
+        vehicle.setLeftInputDown(false);
+        vehicle.setRightInputDown(true);
+        return true;
+    }
+
+
+    function assistedLeft(vehicle) {
+        vehicle.setLeftInputDown(true);
+        vehicle.setRightInputDown(false);
+        return true;
+    }
+
+
+    function holdVehicle(vehicle) {
+        vehicle.setForwardInputDown(false);
+        vehicle.setBackInputDown(false);
+    }
+
+
+    function stopVehicle(vehicle, driver) {
+        vehicle.setForwardInputDown(false);
+        vehicle.setBackInputDown(false);
+        vehicle.setLeftInputDown(false);
+        vehicle.setRightInputDown(false);
+        vehicle.setUpInputDown(false);
+        vehicle.setDownInputDown(false);
+        vehicle.setSprintInputDown(false);
+    }
+
+
+    function applyAvoidTurn(vehicle) {
+        const turnDirection = getAvoidTurnDirection(vehicle);
+
+        if (turnDirection > 0) {
+            assistedRight(vehicle);
+        } else {
+            assistedLeft(vehicle);
+        }
+    }
+
 
     function getAvoidTurnDirection(vehicle) {
         const data = vehicle.getPersistentData();
@@ -681,235 +888,43 @@
         return direction;
     }
 
-    function updateFrontBlockedTicks(vehicle, frontBlocked) {
+
+    function flipAvoidTurnDirection(vehicle) {
         const data = vehicle.getPersistentData();
 
-        if (!frontBlocked) {
-            data.putInt("sbw_ai_front_blocked_ticks", 0);
-            return 0;
-        }
-
-        const ticks = data.getInt("sbw_ai_front_blocked_ticks") + 1;
-        data.putInt("sbw_ai_front_blocked_ticks", ticks);
-
-        return ticks;
+        const direction = getAvoidTurnDirection(vehicle);
+        data.putInt("sbw_ai_avoid_turn_direction", -direction);
     }
 
-    function assistedRight(vehicle) {
-        vehicle.setLeftInputDown(false);
-        vehicle.setRightInputDown(true);
-        return true;
-    }
 
-    function assistedLeft(vehicle) {
-        vehicle.setLeftInputDown(true);
-        vehicle.setRightInputDown(false);
-        return true;
-    }
-
-    function getHorizontalSpeed(vehicle) {
-        const movement = vehicle.getDeltaMovement();
-
-        const x = movement.x();
-        const z = movement.z();
-
-        return Math.sqrt(x * x + z * z);
-    }
-
-    function updateStuckTicks(vehicle, wantedToMove) {
+    function startReverseAlign(vehicle) {
         const data = vehicle.getPersistentData();
 
-        if (!wantedToMove) {
-            data.putInt("sbw_ai_stuck_ticks", 0);
-            return 0;
-        }
+        data.putInt("sbw_ai_reverse_align_ticks", REVERSE_ALIGN_MAX_TICKS);
 
-        const speed = getHorizontalSpeed(vehicle);
-
-        // Tune this number.
-        // 0.03 = very sensitive
-        // 0.06 = decent starting point
-        // 0.10 = only counts as stuck if almost not moving
-        const minimumMovingSpeed = 0.06;
-
-        if (speed < minimumMovingSpeed) {
-            const stuckTicks = data.getInt("sbw_ai_stuck_ticks") + 1;
-            data.putInt("sbw_ai_stuck_ticks", stuckTicks);
-            return stuckTicks;
-        }
-
-        data.putInt("sbw_ai_stuck_ticks", 0);
-        return 0;
+        data.putInt(
+            "sbw_ai_reverse_align_cooldown",
+            REVERSE_ALIGN_MAX_TICKS + REVERSE_ALIGN_COOLDOWN_TICKS
+        );
     }
 
-    /**
-     * 
-     * @param {$VehicleEntity} vehicle 
-     * @returns 
-     */
-    function isVehicleCollidingThisTick(vehicle) {
-        return vehicle.horizontalCollision;
-    }
 
-    function startCollisionRecovery(vehicle) {
-        const data = vehicle.getPersistentData();
-
-        // Since you are currently ticking every tick, 10 = half a second.
-        data.putInt("sbw_ai_collision_recovery", 10);
-    }
-
-    function isRecoveringFromCollision(vehicle) {
-        return vehicle.getPersistentData().getInt("sbw_ai_collision_recovery") > 0;
-    }
-
-    function holdVehicle(vehicle) {
+    function applyReverseAlign(vehicle, diff) {
         vehicle.setForwardInputDown(false);
-        vehicle.setBackInputDown(false);
-    }
+        vehicle.setBackInputDown(true);
 
-    function stopVehicle(vehicle, driver) {
-        vehicle.setForwardInputDown(false)
-        vehicle.setBackInputDown(false)
-        vehicle.setLeftInputDown(false)
-        vehicle.setRightInputDown(false)
-        vehicle.setUpInputDown(false)
-        vehicle.setDownInputDown(false)
-        vehicle.setSprintInputDown(false)
-    }
-
-    function updateRecoveryCooldown(vehicle) {
-        const data = vehicle.getPersistentData();
-
-        let cooldown = data.getInt("sbw_ai_collision_recovery");
-
-        if (cooldown > 0) {
-            data.putInt("sbw_ai_collision_recovery", cooldown - 1);
-        }
-    }
-    function isVehicleRayBlocked(vehicle, direction, distance) {
-        const from = getVehicleFrontRayStart(vehicle);
-
-        const to = new $Vec3(
-            from.x() + direction.x() * distance,
-            from.y(),
-            from.z() + direction.z() * distance
-        );
-
-        const context = new $ClipContext(
-            from,
-            to,
-            $ClipContext$Block.COLLIDER,
-            $ClipContext$Fluid.NONE,
-            vehicle
-        );
-
-        const hit = vehicle.level.clip(context);
-
-        drawCustomRayLine(vehicle, from, to, hit);
-
-        return hit != null && hit.getType() != $HitResult$Type.MISS;
-    }
-
-    function isFrontRayBlocked(vehicle) {
-        return isVehicleRayBlocked(
-            vehicle,
-            getFlatForward(vehicle),
-            getVehicleRayDistance(vehicle)
-        );
-    }
-    function isFrontLeftRayBlocked(vehicle) {
-        return isVehicleRayBlocked(
-            vehicle,
-            getFrontDiagonalDirection(vehicle, -1),
-            getVehicleRayDistance(vehicle)
-        );
-    }
-
-    function isFrontRightRayBlocked(vehicle) {
-        return isVehicleRayBlocked(
-            vehicle,
-            getFrontDiagonalDirection(vehicle, 1),
-            getVehicleRayDistance(vehicle)
-        );
-    }
-
-    function chooseAvoidTurnDirection(vehicle, leftBlocked, rightBlocked) {
-        const data = vehicle.getPersistentData();
-
-        let current = getAvoidTurnDirection(vehicle);
-
-        if (!rightBlocked && leftBlocked) {
-            current = 1;
-        } else if (!leftBlocked && rightBlocked) {
-            current = -1;
-        } else if (!leftBlocked && !rightBlocked) {
-            // Both open: keep current direction.
-        } else {
-            // Both blocked: keep current direction and reverse.
-        }
-
-        data.putInt("sbw_ai_avoid_turn_direction", current);
-        return current;
-    }
-
-    function applyAvoidTurn(vehicle) {
-        const turnDirection = getAvoidTurnDirection(vehicle);
-
-        if (turnDirection > 0) {
+        // For reverse driving, steering may need to be opposite.
+        // If it turns the wrong way in-game, swap these two.
+        if (diff < -12) {
             assistedRight(vehicle);
-        } else {
+        } else if (diff > 12) {
             assistedLeft(vehicle);
+        } else {
+            vehicle.setLeftInputDown(false);
+            vehicle.setRightInputDown(false);
         }
     }
 
-    function getVehicleRayDistance(vehicle) {
-        const aabb = $VehicleMotionUtils.INSTANCE.calculateCombinedAABBOptimized(vehicle);
-
-        const xSize = aabb.maxX - aabb.minX;
-        const zSize = aabb.maxZ - aabb.minZ;
-
-        const vehicleLength = Math.max(xSize, zSize);
-
-        return Math.max(4.0, vehicleLength * 1.5);
-    }
-
-    function getVehicleFrontRayStart(vehicle) {
-        const aabb = $VehicleMotionUtils.INSTANCE.calculateCombinedAABBOptimized(vehicle);
-        const center = aabb.getCenter();
-        const forward = vehicle.getForwardDirection();
-
-        const xSize = aabb.maxX - aabb.minX;
-        const zSize = aabb.maxZ - aabb.minZ;
-        const ySize = aabb.maxY - aabb.minY;
-
-        const vehicleLength = Math.max(xSize, zSize);
-
-        const frontOffset = vehicleLength * 0.5 + 1.0;
-
-        // Start around middle/upper-middle of the vehicle, not low near the ground.
-        const rayY = aabb.minY + ySize * 0.6;
-
-        return new $Vec3(
-            center.x() + forward.x() * frontOffset,
-            rayY,
-            center.z() + forward.z() * frontOffset
-        );
-    }
-
-    function updateDrivingTimers(vehicle) {
-        const data = vehicle.getPersistentData();
-
-        decrementTimer(data, "sbw_ai_reverse_align_cooldown");
-        decrementTimer(data, "sbw_ai_creep_forward_cooldown");
-    }
-
-    function decrementTimer(data, key) {
-        const value = data.getInt(key);
-
-        if (value > 0) {
-            data.putInt(key, value - 1);
-        }
-    }
 
     function canStartReverseAlign(vehicle) {
         const data = vehicle.getPersistentData();
@@ -918,11 +933,13 @@
             && data.getInt("sbw_ai_reverse_align_cooldown") <= 0;
     }
 
+
     function stopReverseAlign(vehicle) {
         const data = vehicle.getPersistentData();
 
         data.putInt("sbw_ai_reverse_align_ticks", 0);
     }
+
 
     function assistedCreepForward(vehicle) {
         const data = vehicle.getPersistentData();
@@ -954,42 +971,128 @@
         return true;
     }
 
-    function drawCustomRayLine(vehicle, from, to, hit) {
-        if (!DEBUG_DRIVING) return;
-        if (vehicle.tickCount % DEBUG_EVERY_TICKS != 0) return;
 
-        const steps = 12;
+    // -------------------------------------------------------------------------
+    // Timers / stuck logic
+    // -------------------------------------------------------------------------
 
-        for (let i = 0; i <= steps; i++) {
-            const t = i / steps;
+    function updateDrivingTimers(vehicle) {
+        const data = vehicle.getPersistentData();
 
-            const x = from.x() + (to.x() - from.x()) * t;
-            const y = from.y() + (to.y() - from.y()) * t;
-            const z = from.z() + (to.z() - from.z()) * t;
+        decrementTimer(data, "sbw_ai_reverse_align_cooldown");
+        decrementTimer(data, "sbw_ai_creep_forward_cooldown");
+    }
 
-            vehicle.level.runCommandSilent(
-                `particle minecraft:end_rod ${x} ${y} ${z} 0 0 0 0 1 force`
-            );
-        }
 
-        if (hit != null && hit.getType() != $HitResult$Type.MISS) {
-            const loc = hit.getLocation();
+    function decrementTimer(data, key) {
+        const value = data.getInt(key);
 
-            vehicle.level.runCommandSilent(
-                `particle minecraft:flame ${loc.x()} ${loc.y()} ${loc.z()} 0 0 0 0 3 force`
-            );
+        if (value > 0) {
+            data.putInt(key, value - 1);
         }
     }
 
-    function getDiffToPosition(vehicle, pos) {
-        const toPos = vehicle.position().vectorTo(pos).normalize();
 
-        const vehicleVec = vehicle.getViewVector(1.0).normalize();
+    function updateFrontBlockedTicks(vehicle, frontBlocked) {
+        const data = vehicle.getPersistentData();
 
-        return $Mth.wrapDegrees(
-            -$VehicleVecUtils.getYRotFromVector(toPos)
-            + $VehicleVecUtils.getYRotFromVector(vehicleVec)
+        if (!frontBlocked) {
+            data.putInt("sbw_ai_front_blocked_ticks", 0);
+            return 0;
+        }
+
+        const ticks = data.getInt("sbw_ai_front_blocked_ticks") + 1;
+        data.putInt("sbw_ai_front_blocked_ticks", ticks);
+
+        return ticks;
+    }
+
+
+    function getHorizontalSpeed(vehicle) {
+        const movement = vehicle.getDeltaMovement();
+
+        const x = movement.x();
+        const z = movement.z();
+
+        return Math.sqrt(x * x + z * z);
+    }
+
+
+    function updateStuckTicks(vehicle, wantedToMove) {
+        const data = vehicle.getPersistentData();
+
+        if (!wantedToMove) {
+            data.putInt("sbw_ai_stuck_ticks", 0);
+            return 0;
+        }
+
+        const speed = getHorizontalSpeed(vehicle);
+
+        const minimumMovingSpeed = 0.06;
+
+        if (speed < minimumMovingSpeed) {
+            const stuckTicks = data.getInt("sbw_ai_stuck_ticks") + 1;
+            data.putInt("sbw_ai_stuck_ticks", stuckTicks);
+            return stuckTicks;
+        }
+
+        data.putInt("sbw_ai_stuck_ticks", 0);
+        return 0;
+    }
+
+
+    function updateRecoveryCooldown(vehicle) {
+        const data = vehicle.getPersistentData();
+
+        let cooldown = data.getInt("sbw_ai_collision_recovery");
+
+        if (cooldown > 0) {
+            data.putInt("sbw_ai_collision_recovery", cooldown - 1);
+        }
+    }
+
+
+    function isVehicleCollidingThisTick(vehicle) {
+        return vehicle.horizontalCollision;
+    }
+
+
+    function startCollisionRecovery(vehicle) {
+        const data = vehicle.getPersistentData();
+
+        data.putInt("sbw_ai_collision_recovery", 10);
+    }
+
+
+    function isRecoveringFromCollision(vehicle) {
+        return vehicle.getPersistentData().getInt("sbw_ai_collision_recovery") > 0;
+    }
+
+
+    // -------------------------------------------------------------------------
+    // Debug / math
+    // -------------------------------------------------------------------------
+
+    function debugDriving(vehicle, message) {
+        if (!DEBUG_DRIVING) return;
+        if (vehicle.tickCount % DEBUG_EVERY_TICKS != 0) return;
+
+        vehicle.level.runCommandSilent(
+            `title @a actionbar {"text":"[SDA] ${message}","color":"yellow"}`
         );
+    }
+
+
+    function horizontalLength(vec) {
+        const x = vec.x();
+        const z = vec.z();
+
+        return Math.sqrt(x * x + z * z);
+    }
+
+
+    function clamp(value, min, max) {
+        return Math.max(min, Math.min(max, value));
     }
 
 })();

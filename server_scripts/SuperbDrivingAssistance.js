@@ -110,26 +110,47 @@
             obbThing(obb)
         });
 
-        let postion = vehicle.position()
-        let aabb = new $AABB($OBB.vector3dToVec3(min), $OBB.vector3dToVec3(max))
+        let vehicleLocation = vehicle.position()
+        let deltaMovement = vehicle.getDeltaMovement().scale(1);
+        let vehicleAABB = new $AABB($OBB.vector3dToVec3(min), $OBB.vector3dToVec3(max));
 
-        let right = vehicleYaw + 90;
-        let left = vehicleYaw - 90;
-        let forward = vehicleYaw;
-        let back = vehicleYaw + 180;
+        let direction_right = Math.cos(vehicleYaw * Math.PI / 180);
+        let direction_left = Math.sin((vehicleYaw * Math.PI / 180));
+        let direction_forward = Math.cos(vehicleYaw * Math.PI / 180);
+        let direction_backward = Math.sin((vehicleYaw * Math.PI / 180));
 
+        let clipContenxtScale = vehicleAABB.getXsize() + vehicleAABB.getZsize()
 
-        let deltaMovement = vehicle.getDeltaMovement().normalize().scale(1);
-        let clipContext = new $ClipContext(aabb.getCenter(), aabb.getCenter().add(deltaMovement.normalize().scale(aabb.getSize() * 2)), "collider", "none", vehicle);
+        // Front and Back
+        let clipContextFB = new $ClipContext(
+            vehicleAABB.getCenter(),
+            vehicleAABB.getCenter().add(deltaMovement.scale(clipContenxtScale)),
+            "collider",
+            "none",
+            vehicle
+        );
 
-        let blockHitResult = vehicle.level.clip(clipContext)
-        let blockLocation = blockHitResult ? blockHitResult.getLocation() : Vec3d.ZERO;
-        debugDriving(vehicle, `Vehicle ClipContext: ${blockHitResult ? aabb.distanceToSqr(blockHitResult.getLocation()) : "None"}`)
-        // debugDriving(vehicle, `Vehicle AABB Size ${aabb.getSize()} Rotation: ${vehicleRotation.length()} Width: ${width} Height: ${height} Depth: ${depth}`)
-        drawParticle("minecraft:end_rod", vehicle, aabb.getCenter().x(), aabb.getCenter().y(), aabb.getCenter().z())
-        drawParticle("minecraft:glow", vehicle, blockLocation.x(), blockLocation.y(), blockLocation.z())
+        // Left and Right
+        let clipContextLR = new $ClipContext(
+            vehicleAABB.getCenter(),
+            vehicleAABB.getCenter().add(deltaMovement.add(direction_left, 0, direction_right).scale(clipContenxtScale)),
+            "collider",
+            "none",
+            vehicle
+        );
+
+        let blockHitResultFB = vehicle.level.clip(clipContextFB)
+        let blockLocationFB = blockHitResultFB.getLocation();
+
+        let blockHitResultLR = vehicle.level.clip(clipContextLR)
+        let blockLocationLR = blockHitResultLR.getLocation();
+        // debugDriving(vehicle, `Vehicle ClipContext | FB: ${blockHitResultFB.getLocation()} LR: ${blockHitResultLR.getLocation()}`)
+
+        // drawParticle("minecraft:end_rod", vehicle, vehicleAABB.getCenter().x(), vehicleAABB.getCenter().y(), vehicleAABB.getCenter().z())
+        // drawParticle("minecraft:glow", vehicle, blockLocationFB.x(), blockLocationFB.y(), blockLocationFB.z())
+        drawParticle("minecraft:soul_fire_flame", vehicle, blockLocationLR.x(), blockLocationLR.y(), blockLocationLR.z())
         // debugDriving(vehicle, `Vehicle Right: ${right} Left: ${left} Width: ${width}`)
-        if (vehicle.tickCount % 60 !== 0) $TestTool.renderAABBEdgesWithParticles(vehicle.level, aabb, "minecraft:flame", 1, false)
+        // if (vehicle.tickCount % 60 !== 0) $TestTool.renderAABBEdgesWithParticles(vehicle.level, vehicleAABB, "minecraft:flame", 1, false)
 
     }
 

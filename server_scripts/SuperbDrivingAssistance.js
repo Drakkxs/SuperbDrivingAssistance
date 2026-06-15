@@ -1,14 +1,12 @@
 // Visit the wiki for more info - https://kubejs.com/
 // requires: superbwarfare
 
-const { $Quaternion } = require("@package/gg/essential/model/util");
-
 (() => {
 
     const { $Double } = require("@package/java/lang");
     const { $Vector3d, $Vector2d } = require("@package/org/joml");
-    const { $OBB, $TestTool } = require("@package/com/atsuishio/superbwarfare/tools");
-    const { $ClipContext } = require("@package/net/minecraft/world/level");
+    const { $OBB, $TestTool, $OBB$Part } = require("@package/com/atsuishio/superbwarfare/tools");
+    const { $ClipContext, $ClipContext$Block, $ClipContext$Fluid, $ClipContext$ShapeGetter } = require("@package/net/minecraft/world/level");
     const { $UUID } = require("@package/java/util");
     const { $Player } = require("@package/net/minecraft/world/entity/player");
     const { $PlayerInteractEvent$EntityInteract } = require("@package/net/neoforged/neoforge/event/entity/player");
@@ -67,17 +65,6 @@ const { $Quaternion } = require("@package/gg/essential/model/util");
     });
 
     /**
-     * Sets all driving inputs to false
-     * @param {$VehicleEntity} vehicle 
-     */
-    function prepareVehicleInputs(vehicle) {
-        vehicle.setBackInputDown(false)
-        vehicle.setForwardInputDown(false)
-        vehicle.setLeftInputDown(false)
-        vehicle.setRightInputDown(false)
-    }
-
-    /**
      * ticks the vehicle
      * @param {$VehicleEntity} vehicle 
      * @param {$LivingEntity} driver 
@@ -91,7 +78,7 @@ const { $Quaternion } = require("@package/gg/essential/model/util");
 
         let min = new $Vector3d($Double.MAX_VALUE, $Double.MAX_VALUE, $Double.MAX_VALUE)
         let max = new $Vector3d(-$Double.MAX_VALUE, -$Double.MAX_VALUE, -$Double.MAX_VALUE)
-        let vehicleRotation = vehicle.getRotationVector();
+        let vehicleYaw = vehicle.getYaw(1);
 
         // Incorperate vehicle bounding box
         min = vehicle.getBoundingBox().getMinPosition();
@@ -103,7 +90,6 @@ const { $Quaternion } = require("@package/gg/essential/model/util");
             let vertices = obb.getVertices();
             let axes = obb.getAxes();
             let rotation = obb.rotation();
-
 
             vertices.forEach((vertex) => {
 
@@ -124,20 +110,25 @@ const { $Quaternion } = require("@package/gg/essential/model/util");
             obbThing(obb)
         });
 
-        let width = (max.x() - min.x()) + Math.sin(vehicleRotation.x);
-        let height = (max.y() - min.y()) + Math.cos(vehicleRotation.y);
-        let depth = (max.z() - min.z()) + Math.sin(vehicleRotation.x);
-
-
         let postion = vehicle.position()
         let aabb = new $AABB($OBB.vector3dToVec3(min), $OBB.vector3dToVec3(max))
 
-        let deltaMovement = vehicle.getDeltaMovement().scale(1)
-        let spot = aabb.getCenter().add(deltaMovement.x(), deltaMovement.y(), deltaMovement.z())
+        let right = vehicleYaw + 90;
+        let left = vehicleYaw - 90;
+        let forward = vehicleYaw;
+        let back = vehicleYaw + 180;
 
 
-        debugDriving(vehicle, `Vehicle AABB Size ${aabb.getSize()} Rotation: ${vehicleRotation.length()} Width: ${width} Height: ${height} Depth: ${depth}`)
+        let deltaMovement = vehicle.getDeltaMovement().normalize().scale(1);
+        let clipContext = new $ClipContext(aabb.getCenter(), aabb.getCenter().add(deltaMovement.normalize().scale(aabb.getSize() * 2)), "collider", "none", vehicle);
+
+        let blockHitResult = vehicle.level.clip(clipContext)
+        let blockLocation = blockHitResult ? blockHitResult.getLocation() : Vec3d.ZERO;
+        debugDriving(vehicle, `Vehicle ClipContext: ${blockHitResult ? aabb.distanceToSqr(blockHitResult.getLocation()) : "None"}`)
+        // debugDriving(vehicle, `Vehicle AABB Size ${aabb.getSize()} Rotation: ${vehicleRotation.length()} Width: ${width} Height: ${height} Depth: ${depth}`)
         drawParticle("minecraft:end_rod", vehicle, aabb.getCenter().x(), aabb.getCenter().y(), aabb.getCenter().z())
+        drawParticle("minecraft:glow", vehicle, blockLocation.x(), blockLocation.y(), blockLocation.z())
+        // debugDriving(vehicle, `Vehicle Right: ${right} Left: ${left} Width: ${width}`)
         if (vehicle.tickCount % 60 !== 0) $TestTool.renderAABBEdgesWithParticles(vehicle.level, aabb, "minecraft:flame", 1, false)
 
     }

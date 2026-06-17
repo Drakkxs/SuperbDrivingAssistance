@@ -129,87 +129,91 @@
 
 
 
-        // Front and Back
-        let isClipFront = ($Mth.floorDiv(vehicle.tickCount, 8) % 2 == 0);
-
-        // Diagonal Left and Right
-        let isClipLeft = ($Mth.floorDiv(vehicle.tickCount, 2) % 2 == 0);
-        // let isClipLeft = isClipFront
-
-        /** @param {$Vec3} vecSource  */
-        function getClipFBInstance(vecSource, vecScale) {
-            // return isClipFront ? vec : vec.add(direction_backward, 0, direction_forward);
-            // return vec.zRot(isClipFront ? 0 : 180);
-            return isClipFront ? vecSource.add(vecScale) : vecSource.subtract(vecScale);
-        }
-
-        // Left and Right
-        function getClipLFRInstance(vecSource, vecScale) {
-            return isClipLeft ? vecSource.add(vecScale) : vecSource.subtract(vecScale);
-        }
-
-        // Front and Back
-        let clipContextFB = new $ClipContext(
-            fromClipContext,
-            // toClipContextDeltascale,
-            getClipFBInstance(vehicleAABB.getCenter(), forwardDireciton.scale(clipContenxtScale)),
-            "collider",
-            "none",
-            vehicle
-        );
-
-        // Diagonal Left and Right
-        let widthSearchVectorScale = new $Vec3(direction_right * vehicleAABB.getSize(), 0, direction_left * vehicleAABB.getSize());
-
-
-
-        // Diagonal Left and Right
-        let clipContextLR = new $ClipContext(
-            fromClipContext,
-
-            getClipLFRInstance(getClipFBInstance(vehicleAABB.getCenter(), forwardDireciton.scale(clipContenxtScale)), widthSearchVectorScale),
-            "collider",
-            "none",
-            vehicle
-        );
-
-        // Left and Right
-        let leftRightVector = new $Vec3(direction_right, 0, direction_left);
-
-        // Straight Left and Right
-        let clipContextSLR = new $ClipContext(
-            fromClipContext,
-            // isClipLeft ? vehicleAABB.getCenter().add(leftRightVector).add(widthSearchVectorScale) : vehicleAABB.getCenter().subtract(leftRightVector).subtract(widthSearchVectorScale),
-            getClipLFRInstance(fromClipContext, leftRightVector.add(widthSearchVectorScale)),
-            "collider",
-            "none",
-            vehicle
-        );
-
-
         /** 
-         * @param {$Vec3} center 
-         * @param {$Vec3} direction 
+         * Gets a vector from the vehicle center to the angle that is NOT affected by the vehicleAABB size and center
+         * Needs the vehicle forward direction to keep left, right, front, back consistent
+         * 
          */
-        function getProbeDirection(center, direction) {
+        function sendClipToAngle(vehicleRotation, startingAngle, endingAngle) {
             // return center.add(direction.x(), 0, direction.z());
             // return new $Vec3(direction_backward, 0, direction_forward);
-            let rotation = vehicle.getRotationVector();
-            return $Vec3.directionFromRotation(rotation.x, (rotation.y + 90) + (vehicle.tickCount % 90)).scale(vehicleAABB.getSize()).add(vehicleAABB.getCenter());
+            // let rotation = vehicle.getRotationVector();
+            // return $Vec3.directionFromRotation(rotation.x, (rotation.y + 90) + (0 % 90)).scale(vehicleAABB.getSize()).add(vehicleAABB.getCenter());
+            return $Vec3.directionFromRotation(vehicleRotation.x, (vehicleRotation.y + startingAngle) + endingAngle);
         }
-        let checkspot = getProbeDirection(vehicleAABB.getCenter(), forwardDireciton.scale(vehicleAABB.getSize()));
 
-        // Front and Back
-        let blockHitResultFB = vehicle.level.clip(clipContextFB)
-        let blockLocationFB = blockHitResultFB.getLocation();
+        let checkspot = sendClipToAngle(vehicle.getRotationVector(), 0, (vehicle.tickCount % 360)).scale(vehicleAABB.getSize()).add(vehicleAABB.getCenter());
 
-        // Diagonal Left and Right
-        let blockHitResultLR = vehicle.level.clip(clipContextLR)
-        let blockLocationLR = blockHitResultLR.getLocation();
 
-        // Straight Left and Right
-        let blockHitResultSLR = vehicle.level.clip(clipContextSLR)
-        let blockLocationSLR = blockHitResultSLR.getLocation();
+        // // Front and Back
+        // let isClipFront = ($Mth.floorDiv(vehicle.tickCount, 8) % 2 == 0);
+
+        // // Diagonal Left and Right
+        // let isClipLeft = ($Mth.floorDiv(vehicle.tickCount, 2) % 2 == 0);
+        // let isClipLeft = isClipFront
+
+        // /** @param {$Vec3} vecSource  */
+        // function getClipFBInstance(vecSource, vecScale) {
+        //     // return isClipFront ? vec : vec.add(direction_backward, 0, direction_forward);
+        //     // return vec.zRot(isClipFront ? 0 : 180);
+        //     return isClipFront ? vecSource.add(vecScale) : vecSource.subtract(vecScale);
+        // }
+
+        // Left and Right
+        // function getClipLFRInstance(vecSource, vecScale) {
+        //     return isClipLeft ? vecSource.add(vecScale) : vecSource.subtract(vecScale);
+        // }
+
+        // // Front and Back
+        // let clipContextFB = new $ClipContext(
+        //     fromClipContext,
+        //     // toClipContextDeltascale,
+        //     getClipFBInstance(vehicleAABB.getCenter(), forwardDireciton.scale(clipContenxtScale)),
+        //     "collider",
+        //     "none",
+        //     vehicle
+        // );
+
+        // // Diagonal Left and Right
+        // let widthSearchVectorScale = new $Vec3(direction_right * vehicleAABB.getSize(), 0, direction_left * vehicleAABB.getSize());
+
+
+
+        // // Diagonal Left and Right
+        // let clipContextLR = new $ClipContext(
+        //     fromClipContext,
+
+        //     getClipLFRInstance(getClipFBInstance(vehicleAABB.getCenter(), forwardDireciton.scale(clipContenxtScale)), widthSearchVectorScale),
+        //     "collider",
+        //     "none",
+        //     vehicle
+        // );
+
+        // // Left and Right
+        // let leftRightVector = new $Vec3(direction_right, 0, direction_left);
+
+        // // Straight Left and Right
+        // let clipContextSLR = new $ClipContext(
+        //     fromClipContext,
+        //     // isClipLeft ? vehicleAABB.getCenter().add(leftRightVector).add(widthSearchVectorScale) : vehicleAABB.getCenter().subtract(leftRightVector).subtract(widthSearchVectorScale),
+        //     getClipLFRInstance(fromClipContext, leftRightVector.add(widthSearchVectorScale)),
+        //     "collider",
+        //     "none",
+        //     vehicle
+        // );
+
+
+        // // Front and Back
+        // let blockHitResultFB = vehicle.level.clip(clipContextFB)
+        // let blockLocationFB = blockHitResultFB.getLocation();
+
+        // // Diagonal Left and Right
+        // let blockHitResultLR = vehicle.level.clip(clipContextLR)
+        // let blockLocationLR = blockHitResultLR.getLocation();
+
+        // // Straight Left and Right
+        // let blockHitResultSLR = vehicle.level.clip(clipContextSLR)
+        // let blockLocationSLR = blockHitResultSLR.getLocation();
 
         // let isClipFront = Math.abs(getDiffToPosition(vehicle, blockLocationFB)) < 90
 
@@ -227,13 +231,13 @@
         // drawParticle("minecraft:end_rod", vehicle, vehicleAABB.getCenter().x(), vehicleAABB.getCenter().y(), vehicleAABB.getCenter().z())
 
 
-        // Front and Back
-        drawParticle("minecraft:glow", vehicle, blockLocationFB.x(), blockLocationFB.y(), blockLocationFB.z())
-        // Diagonal Left and Right
-        drawParticle("minecraft:soul_fire_flame", vehicle, blockLocationLR.x(), blockLocationLR.y(), blockLocationLR.z())
+        // // Front and Back
+        // drawParticle("minecraft:glow", vehicle, blockLocationFB.x(), blockLocationFB.y(), blockLocationFB.z())
+        // // Diagonal Left and Right
+        // drawParticle("minecraft:soul_fire_flame", vehicle, blockLocationLR.x(), blockLocationLR.y(), blockLocationLR.z())
 
-        // Straight Left and Right
-        drawParticle("minecraft:happy_villager", vehicle, blockLocationSLR.x(), blockLocationSLR.y(), blockLocationSLR.z())
+        // // Straight Left and Right
+        // drawParticle("minecraft:happy_villager", vehicle, blockLocationSLR.x(), blockLocationSLR.y(), blockLocationSLR.z())
 
         // Checkspot
         drawParticle("minecraft:flame", vehicle, checkspot.x(), checkspot.y(), checkspot.z())

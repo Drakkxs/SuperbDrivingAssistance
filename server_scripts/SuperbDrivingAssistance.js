@@ -110,8 +110,9 @@
             obbThing(obb)
         });
 
-        let vehicleLocation = vehicle.position()
-        let deltaMovement = vehicle.getDeltaMovement().scale(1);
+        let vehicleLocation = vehicle.position();
+        let viewVector = vehicle.getViewVector(1.0).normalize();
+        let deltaMovement = vehicle.getDeltaMovement().normalize();
         let vehicleAABB = new $AABB($OBB.vector3dToVec3(min), $OBB.vector3dToVec3(max));
 
         let direction_right = Math.cos(vehicleYaw * Math.PI / 180);
@@ -119,36 +120,105 @@
         let direction_forward = Math.cos(vehicleYaw * Math.PI / 180);
         let direction_backward = Math.sin((vehicleYaw * Math.PI / 180));
 
-        let clipContenxtScale = vehicleAABB.getXsize() + vehicleAABB.getZsize()
+        let forwardDireciton = new $Vec3(vehicle.getForwardDirection());
+        let clipContenxtScale = vehicleAABB.getSize() * 2
+        // let toClipContextDeltascale = vehicleAABB.getCenter().add(deltaMovement.scale(clipContenxtScale));
+        let toClipContextForwardDirectionScale = vehicleAABB.getCenter().add(forwardDireciton.scale(clipContenxtScale));
+        let toClipContextViewVectorScale = vehicleAABB.getCenter().add(viewVector.scale(clipContenxtScale));
+        let fromClipContext = vehicleAABB.getCenter();
+
+        // Front and Back
+        let isClipFront = ($Mth.floorDiv(vehicle.tickCount, 8) % 2 == 0);
+
+        // Diagonal Left and Right
+        let isClipLeft = ($Mth.floorDiv(vehicle.tickCount, 2) % 2 == 0);
+        // let isClipLeft = isClipFront
+
+        /** @param {$Vec3} vecSource  */
+        function getClipFBInstance(vecSource, vecScale) {
+            // return isClipFront ? vec : vec.add(direction_backward, 0, direction_forward);
+            // return vec.zRot(isClipFront ? 0 : 180);
+            return isClipFront ? vecSource.add(vecScale) : vecSource.subtract(vecScale);
+        }
+
+        // Left and Right
+        function getClipLFRInstance(vecSource, vecScale) {
+            return isClipLeft ? vecSource.add(vecScale) : vecSource.subtract(vecScale);
+        }
 
         // Front and Back
         let clipContextFB = new $ClipContext(
-            vehicleAABB.getCenter(),
-            vehicleAABB.getCenter().add(deltaMovement.scale(clipContenxtScale)),
+            fromClipContext,
+            // toClipContextDeltascale,
+            getClipFBInstance(vehicleAABB.getCenter(), forwardDireciton.scale(clipContenxtScale)),
+            "collider",
+            "none",
+            vehicle
+        );
+
+        // Diagonal Left and Right
+        let widthSearchVectorScale = new $Vec3(direction_right * vehicleAABB.getSize(), 0, direction_left * vehicleAABB.getSize());
+
+        // Diagonal Left and Right
+        let clipContextLR = new $ClipContext(
+            fromClipContext,
+
+            getClipLFRInstance(getClipFBInstance(vehicleAABB.getCenter(), forwardDireciton.scale(clipContenxtScale)), widthSearchVectorScale),
             "collider",
             "none",
             vehicle
         );
 
         // Left and Right
-        let clipContextLR = new $ClipContext(
-            vehicleAABB.getCenter(),
-            vehicleAABB.getCenter().add(deltaMovement.add(direction_left, 0, direction_right).scale(clipContenxtScale)),
+        let leftRightVector = new $Vec3(direction_right, 0, direction_left);
+
+        // Straight Left and Right
+        let clipContextSLR = new $ClipContext(
+            fromClipContext,
+            // isClipLeft ? vehicleAABB.getCenter().add(leftRightVector).add(widthSearchVectorScale) : vehicleAABB.getCenter().subtract(leftRightVector).subtract(widthSearchVectorScale),
+            getClipLFRInstance(fromClipContext, leftRightVector.add(widthSearchVectorScale)),
             "collider",
             "none",
             vehicle
         );
 
+        // Front and Back
         let blockHitResultFB = vehicle.level.clip(clipContextFB)
         let blockLocationFB = blockHitResultFB.getLocation();
 
+        // Diagonal Left and Right
         let blockHitResultLR = vehicle.level.clip(clipContextLR)
         let blockLocationLR = blockHitResultLR.getLocation();
-        // debugDriving(vehicle, `Vehicle ClipContext | FB: ${blockHitResultFB.getLocation()} LR: ${blockHitResultLR.getLocation()}`)
+
+        // Straight Left and Right
+        let blockHitResultSLR = vehicle.level.clip(clipContextSLR)
+        let blockLocationSLR = blockHitResultSLR.getLocation();
+
+        // let isClipFront = Math.abs(getDiffToPosition(vehicle, blockLocationFB)) < 90
+
+        debugDriving(vehicle,
+            `Blocked Checks: ${isClipLeft ? "DL" : "DR"
+            } ${blockHitResultLR.getType()} ${isClipFront ? "F" : "B"
+            }: ${blockHitResultFB.getType()} ${isClipLeft ? "SL" : "SR"
+            }: ${blockHitResultSLR.getType()}`
+        );
+
+        // debugDriving(vehicle,
+        //     `forwardDireciton: ${forwardDireciton} deltaMovement: ${deltaMovement}`
+        // )
 
         // drawParticle("minecraft:end_rod", vehicle, vehicleAABB.getCenter().x(), vehicleAABB.getCenter().y(), vehicleAABB.getCenter().z())
-        // drawParticle("minecraft:glow", vehicle, blockLocationFB.x(), blockLocationFB.y(), blockLocationFB.z())
+
+
+        // Front and Back
+        drawParticle("minecraft:glow", vehicle, blockLocationFB.x(), blockLocationFB.y(), blockLocationFB.z())
+        // Diagonal Left and Right
         drawParticle("minecraft:soul_fire_flame", vehicle, blockLocationLR.x(), blockLocationLR.y(), blockLocationLR.z())
+
+        // Straight Left and Right
+        drawParticle("minecraft:happy_villager", vehicle, blockLocationSLR.x(), blockLocationSLR.y(), blockLocationSLR.z())
+
+
         // debugDriving(vehicle, `Vehicle Right: ${right} Left: ${left} Width: ${width}`)
         // if (vehicle.tickCount % 60 !== 0) $TestTool.renderAABBEdgesWithParticles(vehicle.level, vehicleAABB, "minecraft:flame", 1, false)
 
@@ -192,6 +262,21 @@
     function drawParticle(particle, vehicle, x, y, z) {
         vehicle.getLevel().runCommandSilent(
             `particle ${particle} ${x} ${y} ${z} 0 0 0 0 1 force`
+        );
+    }
+
+    /**
+     * Turns a vector to a yaw
+     * @param {$VehicleEntity} vehicle 
+     * @param {$Vec3} pos 
+     */
+    function getDiffToPosition(vehicle, pos) {
+        let toPos = vehicle.position().vectorTo(pos).normalize();
+        let vehicleVec = vehicle.getViewVector(1.0).normalize();
+
+        return $Mth.wrapDegrees(
+            -$VehicleVecUtils.getYRotFromVector(toPos)
+            + $VehicleVecUtils.getYRotFromVector(vehicleVec)
         );
     }
 

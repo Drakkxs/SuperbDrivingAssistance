@@ -195,7 +195,7 @@
             // return center.add(direction.x(), 0, direction.z());
             // return new $Vec3(direction_backward, 0, direction_forward);
             let rotation = vehicle.getRotationVector();
-            return $Vec3.directionFromRotation(rotation.x, rotation.y + ((vehicle.tickCount - (vehicle.tickCount % 90)) % 180)).scale(vehicleAABB.getSize()).add(vehicleAABB.getCenter());
+            return $Vec3.directionFromRotation(rotation.x, (rotation.y + 90) + (vehicle.tickCount % 90)).scale(vehicleAABB.getSize()).add(vehicleAABB.getCenter());
         }
         let checkspot = getProbeDirection(vehicleAABB.getCenter(), forwardDireciton.scale(vehicleAABB.getSize()));
 

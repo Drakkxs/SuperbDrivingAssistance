@@ -14,8 +14,7 @@
     const { $VehicleEntity } = require("@package/com/atsuishio/superbwarfare/entity/vehicle/base");
     const { $VehicleVecUtils, $VehicleMotionUtils } = require("@package/com/atsuishio/superbwarfare/entity/vehicle/utils");
     const { $Monster } = require("@package/net/minecraft/world/entity/monster");
-    const { $LivingEntity } = require("@package/net/minecraft/world/entity");
-    const { $Mth } = require("@package/net/minecraft/util");
+    const { $LivingEntity, $Entity } = require("@package/net/minecraft/world/entity");
     const { $Vec3, $AABB } = require("@package/net/minecraft/world/phys");
 
     // Utility used to place vehicles into the vehicle passangers.
@@ -78,7 +77,6 @@
 
         let min = new $Vector3d($Double.MAX_VALUE, $Double.MAX_VALUE, $Double.MAX_VALUE)
         let max = new $Vector3d(-$Double.MAX_VALUE, -$Double.MAX_VALUE, -$Double.MAX_VALUE)
-        let vehicleYaw = vehicle.getYaw(1);
 
         // Incorperate vehicle bounding box
         min = vehicle.getBoundingBox().getMinPosition();
@@ -106,65 +104,57 @@
             });
         }
 
+        /** 
+         * Gets a vector from the vehicle center to the angle that is NOT affected by the vehicleAABB size and center
+         * Needs the vehicle forward direction to keep left, right, front, back consistent
+         * @param {$Vec3} vehicleRotation 
+         * @param {number} startingAngle 
+         * @param {number} endingAngle
+         */
+        function getClipAngleVector(vehicleRotation, startingAngle, endingAngle) {
+            return $Vec3.directionFromRotation(vehicleRotation.x, (vehicleRotation.y + startingAngle) + endingAngle);
+        }
+
+
+        /**
+         * Gets the block hit result from the clip context
+         * @param {$Vec3} to Clip begin
+         * @param {$Vec3} from Clip end
+         * @param {import("@package/net/minecraft/world/level").$ClipContext$Block_} clipBlock Clip block 
+         * @param {import("@package/net/minecraft/world/level").$ClipContext$Fluid_} clipFluid Clip fluid
+         * @param {$Entity} entity The entity the clip context is for
+         */
+        function getClipContext(to, from, clipBlock, clipFluid, entity) {
+            return new $ClipContext(to, from, clipBlock, clipFluid, entity);
+        }
+
         obbList.forEach((obb) => {
             obbThing(obb)
         });
 
-        let vehicleLocation = vehicle.position();
-        let viewVector = vehicle.getViewVector(1.0).normalize();
-        let deltaMovement = vehicle.getDeltaMovement().normalize();
         let vehicleAABB = new $AABB($OBB.vector3dToVec3(min), $OBB.vector3dToVec3(max));
+        let vehicleStepHeight = vehicle.maxUpStep();
 
-        let direction_right = Math.cos(vehicleYaw * Math.PI / 180);
-        let direction_left = Math.sin((vehicleYaw * Math.PI / 180));
-        let direction_forward = Math.cos(vehicleYaw * Math.PI / 180);
-        let direction_backward = Math.sin((vehicleYaw * Math.PI / 180));
+        let clipAngles = [-90, 90, -180, 180]; // Front, Back, Left, Right
+        let clipAngleVectors = clipAngles.map((angle) => {
+            return getClipAngleVector(vehicle.getRotationVector(), 0, angle).scale(vehicleAABB.getSize()).add(vehicleAABB.getCenter());
+        });
 
-        let forwardDireciton = new $Vec3(vehicle.getForwardDirection());
-        let clipContenxtScale = vehicleAABB.getSize() * 2
-        // let toClipContextDeltascale = vehicleAABB.getCenter().add(deltaMovement.scale(clipContenxtScale));
-        let toClipContextForwardDirectionScale = vehicleAABB.getCenter().add(forwardDireciton.scale(clipContenxtScale));
-        let toClipContextViewVectorScale = vehicleAABB.getCenter().add(viewVector.scale(clipContenxtScale));
-        let fromClipContext = vehicleAABB.getCenter();
-
-
-
-        /** 
-         * Gets a vector from the vehicle center to the angle that is NOT affected by the vehicleAABB size and center
-         * Needs the vehicle forward direction to keep left, right, front, back consistent
-         * 
-         */
-        function sendClipToAngle(vehicleRotation, startingAngle, endingAngle) {
-            // return center.add(direction.x(), 0, direction.z());
-            // return new $Vec3(direction_backward, 0, direction_forward);
-            // let rotation = vehicle.getRotationVector();
-            // return $Vec3.directionFromRotation(rotation.x, (rotation.y + 90) + (0 % 90)).scale(vehicleAABB.getSize()).add(vehicleAABB.getCenter());
-            return $Vec3.directionFromRotation(vehicleRotation.x, (vehicleRotation.y + startingAngle) + endingAngle);
+        // for (let clipAngleVector of clipAngleVectors) {
+        for (let angle = 0; angle <= 360; angle += 5) {
+            var stepheightVector = vehicleAABB.getBottomCenter().add(0, vehicleStepHeight / 2, 0);
+            var clipAngleVector = getClipAngleVector(vehicle.getRotationVector(), 0, angle).scale(vehicleAABB.getSize()).add(stepheightVector);
+            var clipContext = getClipContext(stepheightVector, clipAngleVector, "collider", "none", vehicle);
+            var blockHitResult = vehicle.level.clip(clipContext);
+            var blockHitLocation = blockHitResult.getLocation();
+            drawParticle("minecraft:glow", vehicle, blockHitLocation.x(), blockHitLocation.y(), blockHitLocation.z());
+            if (blockHitResult.getType() != "MISS") {
+                debugDriving(vehicle, `Hit: ${blockHitResult.getType()} Angle: ${angle} DistanceTo ${vehicle.distanceTo(blockHitLocation) / 100}`);
+            }
         }
-
-        let checkspot = sendClipToAngle(vehicle.getRotationVector(), 0, (vehicle.tickCount % 360)).scale(vehicleAABB.getSize()).add(vehicleAABB.getCenter());
-
-
-        // Checkspot
-        drawParticle("minecraft:flame", vehicle, checkspot.x(), checkspot.y(), checkspot.z())
-        debugDriving(vehicle, `Checkspot: ${checkspot} Forward: ${forwardDireciton}`)
 
         // if (vehicle.tickCount % 60 !== 0) $TestTool.renderAABBEdgesWithParticles(vehicle.level, vehicleAABB, "minecraft:flame", 1, false)
 
-    }
-
-    /**
-     * Draws a AABB
-     * @param {string} particle
-     * @param {$VehcileEntity} vehicle
-     * @param {$AABB} aabb
-     */
-    function drawAABB(particle, vehicle, aabb) {
-        let center = aabb.getCenter()
-        let max = aabb.getMaxPosition()
-        let min = aabb.getMinPosition()
-        drawParticle(particle, vehicle, max.x(), max.y(), max.z())
-        drawParticle(particle, vehicle, min.x(), min.y(), min.z())
     }
 
     /**
@@ -191,21 +181,6 @@
     function drawParticle(particle, vehicle, x, y, z) {
         vehicle.getLevel().runCommandSilent(
             `particle ${particle} ${x} ${y} ${z} 0 0 0 0 1 force`
-        );
-    }
-
-    /**
-     * Turns a vector to a yaw
-     * @param {$VehicleEntity} vehicle 
-     * @param {$Vec3} pos 
-     */
-    function getDiffToPosition(vehicle, pos) {
-        let toPos = vehicle.position().vectorTo(pos).normalize();
-        let vehicleVec = vehicle.getViewVector(1.0).normalize();
-
-        return $Mth.wrapDegrees(
-            -$VehicleVecUtils.getYRotFromVector(toPos)
-            + $VehicleVecUtils.getYRotFromVector(vehicleVec)
         );
     }
 

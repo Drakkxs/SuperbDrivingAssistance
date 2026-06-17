@@ -127,6 +127,8 @@
         let toClipContextViewVectorScale = vehicleAABB.getCenter().add(viewVector.scale(clipContenxtScale));
         let fromClipContext = vehicleAABB.getCenter();
 
+
+
         // Front and Back
         let isClipFront = ($Mth.floorDiv(vehicle.tickCount, 8) % 2 == 0);
 
@@ -159,6 +161,8 @@
         // Diagonal Left and Right
         let widthSearchVectorScale = new $Vec3(direction_right * vehicleAABB.getSize(), 0, direction_left * vehicleAABB.getSize());
 
+
+
         // Diagonal Left and Right
         let clipContextLR = new $ClipContext(
             fromClipContext,
@@ -182,6 +186,19 @@
             vehicle
         );
 
+
+        /** 
+         * @param {$Vec3} center 
+         * @param {$Vec3} direction 
+         */
+        function getProbeDirection(center, direction) {
+            // return center.add(direction.x(), 0, direction.z());
+            // return new $Vec3(direction_backward, 0, direction_forward);
+            let rotation = vehicle.getRotationVector();
+            return $Vec3.directionFromRotation(rotation.x, rotation.y + (vehicle.tickCount % 90)).scale(vehicleAABB.getSize()).add(vehicleAABB.getCenter());
+        }
+        let checkspot = getProbeDirection(vehicleAABB.getCenter(), forwardDireciton.scale(vehicleAABB.getSize()));
+
         // Front and Back
         let blockHitResultFB = vehicle.level.clip(clipContextFB)
         let blockLocationFB = blockHitResultFB.getLocation();
@@ -196,12 +213,12 @@
 
         // let isClipFront = Math.abs(getDiffToPosition(vehicle, blockLocationFB)) < 90
 
-        debugDriving(vehicle,
-            `Blocked Checks: ${isClipLeft ? "DL" : "DR"
-            } ${blockHitResultLR.getType()} ${isClipFront ? "F" : "B"
-            }: ${blockHitResultFB.getType()} ${isClipLeft ? "SL" : "SR"
-            }: ${blockHitResultSLR.getType()}`
-        );
+        // debugDriving(vehicle,
+        //     `Blocked Checks: ${isClipLeft ? "DL" : "DR"
+        //     } ${blockHitResultLR.getType()} ${isClipFront ? "F" : "B"
+        //     }: ${blockHitResultFB.getType()} ${isClipLeft ? "SL" : "SR"
+        //     }: ${blockHitResultSLR.getType()}`
+        // );
 
         // debugDriving(vehicle,
         //     `forwardDireciton: ${forwardDireciton} deltaMovement: ${deltaMovement}`
@@ -218,6 +235,9 @@
         // Straight Left and Right
         drawParticle("minecraft:happy_villager", vehicle, blockLocationSLR.x(), blockLocationSLR.y(), blockLocationSLR.z())
 
+        // Checkspot
+        drawParticle("minecraft:flame", vehicle, checkspot.x(), checkspot.y(), checkspot.z())
+        debugDriving(vehicle, `Checkspot: ${checkspot} Forward: ${forwardDireciton}`)
 
         // debugDriving(vehicle, `Vehicle Right: ${right} Left: ${left} Width: ${width}`)
         // if (vehicle.tickCount % 60 !== 0) $TestTool.renderAABBEdgesWithParticles(vehicle.level, vehicleAABB, "minecraft:flame", 1, false)
